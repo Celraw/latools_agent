@@ -243,7 +243,7 @@ object AgentTools {
                             android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME,
                         )
                         val (w, h) = AgentAccessibilityService.instance?.screenSize() ?: (0 to 0)
-                        "已开始操控。屏幕 ${'$'}{w}x${'$'}{h}。已把 Agent 退到桌面；" +
+                        "已开始操控。屏幕 ${w}x${h}。已把 Agent 退到桌面；" +
                             "请先 open_app 打开目标应用，用 get_foreground_app 确认前台后再 tap。" +
                             "tap/swipe 推荐用 0~1 相对坐标（图片被接口缩放时绝对像素会偏）。"
                     } else "启动操控失败"
@@ -449,6 +449,30 @@ object AgentTools {
         return "$action $pkg\n${r.output}\n[通道=${r.channel}]"
     }
 
+    /**
+     * 启动后轮询前台，确认真的切过去了再返回。
+     *
+     * 为什么必须轮询：`am start` / startActivity 只是"请求启动"，系统动画 + 首帧
+     * 往往要 300~1500ms；期间前台仍是桌面。如果这时就告诉模型"已启动"，
+     * 模型会立刻 tap，点在桌面上。AI 实测踩过这个坑。
+     */
+    private fun awaitForegroundResult(pkg: String, timeoutMs: Long = 3_000): String {
+        val svc = AgentAccessibilityService.instance
+        if (svc == null) {
+            Thread.sleep(600)
+            return "已请求启动 $pkg（无障碍未连接，无法确认前台）"
+        }
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var lastForeground: String? = null
+        while (System.currentTimeMillis() < deadline) {
+            val fg = runCatching { svc.foregroundPackage() }.getOrNull()
+            lastForeground = fg
+            if (fg == pkg) return "已启动并确认前台：$pkg"
+            Thread.sleep(60)
+        }
+        return "已请求启动 $pkg，但前台仍是 ${lastForeground ?: "未知"}（可能被启动页/权限弹窗拦截）"
+    }
+
     private suspend fun openApp(context: Context, config: AgentConfig, pkg: String): String {
         if (pkg.isBlank()) return "参数错误：缺少 package"
         /*
@@ -459,7 +483,8 @@ object AgentTools {
         val intent = context.packageManager.getLaunchIntentForPackage(pkg)
         if (intent != null) {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            runCatching { context.startActivity(intent); return "已启动 $pkg" }
+            val ok = runCatching { context.startActivity(intent); true }.getOrDefault(false)
+            if (ok) return awaitForegroundResult(pkg)
         }
         val resolved = AgentShell.run(
             context,
@@ -470,7 +495,7 @@ object AgentTools {
             return "找不到可启动的应用：$pkg（未安装，或没有可启动的 Activity）"
         }
         val start = AgentShell.run(context, "am start -n ${shq(resolved)}", config.channels, 10_000)
-        return if (start.ok) "已启动 $pkg（$resolved）" else "启动失败：${start.output.take(300)}"
+        return if (start.ok) awaitForegroundResult(pkg) else "启动失败：${start.output.take(300)}"
     }
 
     private suspend fun screenSnapshot(): String {
@@ -490,7 +515,7 @@ object AgentTools {
          * data URL 里混任何额外文字都会导致服务端 400 Invalid base64 data。
          */
         return IMAGE_MARKER + "data:image/jpeg;base64," + b64 +
-            "\n截图分辨率 ${'$'}{w}x${'$'}{h}。tap/swipe 的坐标请直接使用这个分辨率，不要按其它尺寸换算。"
+            "\n截图分辨率 ${w}x${h}。tap/swipe 的坐标请直接使用这个分辨率，不要按其它尺寸换算。"
     }
 
     private suspend fun screenshot(context: Context, config: AgentConfig): String {
