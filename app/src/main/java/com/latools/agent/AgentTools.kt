@@ -434,11 +434,14 @@ object AgentTools {
         } ?: return "截图失败（系统拒绝或无显示）"
         val out = java.io.ByteArrayOutputStream()
         bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 70, out)
-        val w = bitmap.width
-        val h = bitmap.height
         bitmap.recycle()
         val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-        return IMAGE_MARKER + "data:image/jpeg;base64," + b64 + "\n（图片尺寸 ${'$'}w x ${'$'}h）"
+        /*
+         * 注意：data URL 后面不能再拼任何人类可读文字。
+         * 之前拼了「（图片尺寸 WxH）」，服务端 base64 解码直接 400 Invalid base64 data。
+         * 尺寸信息对模型不是必需的，像素坐标它可以从图片本身推断。
+         */
+        return IMAGE_MARKER + "data:image/jpeg;base64," + b64
     }
 
     private suspend fun screenshot(context: Context, config: AgentConfig): String {
