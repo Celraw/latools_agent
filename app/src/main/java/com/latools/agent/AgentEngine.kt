@@ -182,6 +182,23 @@ object AgentApi {
                     put("parameters", JSONObject().apply { put("type", "object"); put("properties", JSONObject()) })
                 })
             })
+        put(JSONObject().apply {
+            put("type", "function")
+            put("function", JSONObject().apply {
+                put("name", "fetch_url")
+                put("description", "直接访问一个 http/https 网址并返回正文（HTML 会转成纯文本）。适合打开具体文档页、API 响应或搜索结果里的链接。")
+                put("parameters", JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject().apply {
+                        put("url", JSONObject().apply {
+                            put("type", "string")
+                            put("description", "完整 URL，必须以 http:// 或 https:// 开头")
+                        })
+                    })
+                    put("required", JSONArray().put("url"))
+                })
+            })
+        })
         if (includeSearch) {
             put(JSONObject().apply {
                 put("type", "function")
@@ -202,6 +219,67 @@ object AgentApi {
             })
         }
     }.toString()
+
+    /**
+     * 直接抓取一个 URL 的正文。
+     *
+     * - 只允许 http/https（file://、content:// 一律拒绝，避免读本机私有数据）
+     * - 限制响应大小与输出长度，防止一个超大页面把上下文撑爆
+     * - HTML 粗转纯文本：去 script/style、去标签、压空白；JSON/纯文本原样返回
+     */
+    fun fetchUrl(url: String): String {
+        val normalized = url.trim()
+        if (!normalized.startsWith("http://") && !normalized.startsWith("https://")) {
+            return "只支持 http/https 地址"
+        }
+        val conn = (URL(normalized).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 15_000
+            readTimeout = 30_000
+            instanceFollowRedirects = true
+            setRequestProperty("Accept", "text/html,application/json,text/plain,*/*")
+            setRequestProperty("Accept-Encoding", "identity")
+            setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android) LAToolsAgent/1.0")
+        }
+        return try {
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val raw = stream?.use { input ->
+                val buf = java.io.ByteArrayOutputStream()
+                val chunk = ByteArray(16 * 1024)
+                var total = 0
+                while (true) {
+                    val n = input.read(chunk)
+                    if (n <= 0) break
+                    total += n
+                    if (total > 512 * 1024) break
+                    buf.write(chunk, 0, n)
+                }
+                buf.toString("UTF-8")
+            }.orEmpty()
+            if (code !in 200..299) {
+                "抓取失败（HTTP $code）：${raw.take(200)}"
+            } else {
+                val contentType = conn.contentType.orEmpty()
+                val text = if (contentType.contains("html", ignoreCase = true)) htmlToText(raw) else raw
+                "URL: $normalized\nHTTP: $code\n\n" + text.take(8_000)
+            }
+        } catch (e: Exception) {
+            "抓取失败：${e.message ?: e.javaClass.simpleName}"
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun htmlToText(html: String): String = html
+        .replace(Regex("<script[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), " ")
+        .replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), " ")
+        .replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
+        .replace(Regex("</(p|div|li|h[1-6]|tr)>", RegexOption.IGNORE_CASE), "\n")
+        .replace(Regex("<[^>]+>"), " ")
+        .replace(Regex("[ \\t]+"), " ")
+        .replace(Regex("\n{3,}"), "\n\n")
+        .trim()
 
     /** Tavily 搜索：返回给模型的纯文本结果（标题 + 链接 + 摘要）。 */
     fun tavilySearch(config: AgentConfig, query: String): String {
@@ -534,6 +612,13 @@ class AgentEngine(
 
             for (call in finalReply.calls) {
                 val output = when (call.name) {
+                    "fetch_url" -> {
+                        val url = runCatching {
+                            JSONObject(call.arguments).optString("url")
+                        }.getOrDefault("")
+                        if (url.isBlank()) "参数错误：缺少 url"
+                        else withContext(Dispatchers.IO) { AgentApi.fetchUrl(url) }
+                    }
                     "web_search" -> {
                         val query = runCatching {
                             JSONObject(call.arguments).optString("query")

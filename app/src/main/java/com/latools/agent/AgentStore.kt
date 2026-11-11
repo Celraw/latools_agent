@@ -155,7 +155,7 @@ object AgentStore {
             "4. 失败要如实说：命令返回非 0 或权限不足时，原样说明失败原因，不要编造结果。\n" +
             "5. 回答用中文，先给结论再给依据；命令放在代码块里，输出过长时只摘关键行。\n" +
             "6. 不确定设备型号/ROM 差异时先问，不要猜测。\n" +
-            "你只能通过 run_shell 与 get_device_info 两个工具操作设备，无法访问网络或其它应用私有数据。"
+            "可用工具：run_shell（执行命令）、get_device_info（读取设备信息）、fetch_url（直接访问网页/接口）。配置 Tavily Key 后另有 web_search。除这些工具外，你无法访问其它应用私有数据。"
 
     fun config(context: Context): AgentConfig {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
