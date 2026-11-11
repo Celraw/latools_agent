@@ -1,0 +1,591 @@
+package com.latools.agent
+
+import android.content.Context
+import org.json.JSONArray
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import rikka.shizuku.Shizuku
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.TimeUnit
+
+
+/** org.json 的 optString 对 JSONObject.NULL 会返回字面量 "null"，必须显式过滤。 */
+private fun JSONObject.text(key: String): String {
+    if (!has(key) || isNull(key)) return ""
+    return optString(key, "").takeIf { it != "null" } ?: ""
+}
+
+/**
+ * 上一次流式请求的诊断信息。
+ *
+ * 没有 adb 的时候，用户没法看 logcat；把 HTTP 状态、Content-Type、收到的 delta 数
+ * 直接展示在界面上，"为什么没流式"就能一眼定位（接口不支持 SSE / 被 gzip / 401 等）。
+ */
+object SseDiagnostics {
+    @Volatile var lastHttpStatus: Int = 0
+    @Volatile var lastContentType: String = "-"
+    @Volatile var lastDeltaCount: Int = 0
+    @Volatile var lastError: String = ""
+    @Volatile var fallbackUsed: Boolean = false
+}
+
+/** 一条命令的执行结果。 */
+data class ShellResult(val ok: Boolean, val output: String, val channel: String)
+
+/**
+ * 通道执行器。
+ *
+ * 用户可以在设置里多选允许使用的通道，这里按 ROOT → Shizuku → Dhizuku 顺序尝试，
+ * 第一个能用的通道执行成功就返回；全部失败时把每条通道的失败原因拼起来 ——
+ * "执行失败"四个字对排查没有任何帮助。
+ */
+object AgentShell {
+
+    fun available(context: Context): List<AgentChannel> = buildList {
+        if (rootAvailable()) add(AgentChannel.ROOT)
+        if (shizukuAvailable()) add(AgentChannel.SHIZUKU)
+        if (runCatching {
+                com.rosan.dhizuku.api.Dhizuku.init(context) && com.rosan.dhizuku.api.Dhizuku.isPermissionGranted()
+            }.getOrDefault(false)
+        ) add(AgentChannel.DHIZUKU)
+    }
+
+    fun run(context: Context, command: String, channels: Set<String>, timeoutMs: Long = 20_000): ShellResult {
+        if (channels.isEmpty()) return ShellResult(false, "没有勾选任何特权通道", "-")
+        val errors = mutableListOf<String>()
+        for (channel in AgentChannel.entries) {
+            if (channel.id !in channels) continue
+            val result = runCatching { runOn(context, channel, command, timeoutMs) }
+                .getOrElse { ShellResult(false, "通道异常：${it.message ?: it.javaClass.simpleName}", channel.label) }
+            if (result.ok) return result
+            errors += "${channel.label}: ${result.output.take(220)}"
+        }
+        return ShellResult(false, errors.joinToString("\n"), "-")
+    }
+
+    private fun runOn(context: Context, channel: AgentChannel, command: String, timeoutMs: Long): ShellResult {
+        /*
+         * 命令用哨兵包裹：`(cmd) 2>&1; echo __LA_RC:$?`
+         *
+         * 为什么不再用 waitFor / exitValue：
+         * Shizuku / Dhizuku 的 RemoteProcess 是代理进程，`exitValue()` 在进程未结束时会抛
+         * IllegalThreadStateException("process hasn't exited")，而它们的 waitFor(timeout)
+         * 实现也不能保证等到真实退出 —— 真机上表现出来就是每条命令都失败。
+         *
+         * 现在只依赖 stdout 的 EOF：命令跑完、shell 退出，读流自然结束；
+         * 退出码由 shell 自己回显，再去掉最后那行解析出来。完全不碰 exitValue。
+         */
+        val wrapped = "($command) 2>&1; echo __LA_RC:${'$'}?"
+        val process = when (channel) {
+            AgentChannel.ROOT -> {
+                require(rootAvailable()) { "未获得 ROOT 授权" }
+                Runtime.getRuntime().exec(arrayOf("su", "-c", wrapped))
+            }
+            AgentChannel.SHIZUKU -> {
+                require(shizukuAvailable()) { "Shizuku 未授权" }
+                shizukuProcess(wrapped)
+            }
+            AgentChannel.DHIZUKU -> {
+                require(
+                    com.rosan.dhizuku.api.Dhizuku.init(context) &&
+                        com.rosan.dhizuku.api.Dhizuku.isPermissionGranted(),
+                ) { "Dhizuku 未授权" }
+                com.rosan.dhizuku.api.Dhizuku.newProcess(arrayOf("sh", "-c", wrapped), null, null)
+            }
+        }
+
+        val buf = StringBuilder()
+        val reader = kotlin.concurrent.thread(name = "agent-shell-reader") {
+            runCatching { buf.append(process.inputStream.bufferedReader().readText()) }
+        }
+        reader.join(timeoutMs)
+        if (reader.isAlive) {
+            runCatching { process.destroy() }
+            reader.join(300)
+            return ShellResult(false, "执行超时（${timeoutMs / 1000}s），已终止", channel.label)
+        }
+
+        val raw = buf.toString()
+        val rcMatch = Regex("__LA_RC:(\\d+)").findAll(raw).lastOrNull()
+        val code = rcMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+        val output = raw.replace(Regex("\\s*__LA_RC:\\d+\\s*$"), "").trim()
+        val text = buildString {
+            if (output.isNotEmpty()) append(output)
+            if (isEmpty()) append("（无输出）")
+            append("\n[exit=").append(code).append(']')
+        }
+        return ShellResult(code == 0, text.take(8_000), channel.label)
+    }
+
+    /** Shizuku 13.x 起 newProcess 是私有静态方法，沿用 CommandRunner 的反射方案。 */
+    private fun shizukuProcess(command: String): Process {
+        val method = Shizuku::class.java.getDeclaredMethod(
+            "newProcess",
+            Array<String>::class.java,
+            Array<String>::class.java,
+            String::class.java,
+        )
+        method.isAccessible = true
+        return method.invoke(null, arrayOf("sh", "-c", command), null, null) as Process
+    }
+
+    private fun rootAvailable(): Boolean = runCatching {
+        val process = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+        val output = process.inputStream.readBytes().toString(Charsets.UTF_8)
+        process.waitFor()
+        output.contains("uid=0")
+    }.getOrDefault(false)
+
+    private fun shizukuAvailable(): Boolean = runCatching {
+        Shizuku.pingBinder() && Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }.getOrDefault(false)
+
+}
+
+// ------------------------------------------------------------------ API
+
+data class AssistantReply(val content: String?, val reasoning: String?, val calls: List<ToolCall>)
+
+/**
+ * OpenAI 兼容接口。只实现 chat/completions 一种调用，非流式。
+ *
+ * 为什么不做流式：工具调用轮次多、每轮还要回传结果，SSE 解析会让状态机复杂一倍；
+ * 而 Agent 场景里用户看的是"命令执行结果"，不是逐字打字效果。
+ */
+object AgentApi {
+
+    private fun toolsJson(includeSearch: Boolean): String = JSONArray().apply {
+            put(JSONObject().apply {
+                put("type", "function")
+                put("function", JSONObject().apply {
+                    put("name", "run_shell")
+                    put("description", "在本机以特权身份执行一条 shell 命令，返回 stdout/stderr 与退出码。")
+                    put("parameters", JSONObject().apply {
+                        put("type", "object")
+                        put("properties", JSONObject().apply {
+                            put("command", JSONObject().apply {
+                                put("type", "string")
+                                put("description", "要执行的完整 shell 命令")
+                            })
+                        })
+                        put("required", JSONArray().put("command"))
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("type", "function")
+                put("function", JSONObject().apply {
+                    put("name", "get_device_info")
+                    put("description", "读取设备基础信息（型号、系统版本、SoC、当前特权通道）。")
+                    put("parameters", JSONObject().apply { put("type", "object"); put("properties", JSONObject()) })
+                })
+            })
+        if (includeSearch) {
+            put(JSONObject().apply {
+                put("type", "function")
+                put("function", JSONObject().apply {
+                    put("name", "web_search")
+                    put("description", "联网搜索最新信息（Tavily）。需要实时资讯、文档版本、新闻时使用。")
+                    put("parameters", JSONObject().apply {
+                        put("type", "object")
+                        put("properties", JSONObject().apply {
+                            put("query", JSONObject().apply {
+                                put("type", "string")
+                                put("description", "搜索关键词，尽量具体")
+                            })
+                        })
+                        put("required", JSONArray().put("query"))
+                    })
+                })
+            })
+        }
+    }.toString()
+
+    /** Tavily 搜索：返回给模型的纯文本结果（标题 + 链接 + 摘要）。 */
+    fun tavilySearch(config: AgentConfig, query: String): String {
+        if (config.tavilyKey.isBlank()) return "未配置 Tavily Key，无法联网搜索"
+        val body = JSONObject().apply {
+            put("api_key", config.tavilyKey)
+            put("query", query)
+            put("search_depth", "basic")
+            put("max_results", 5)
+            put("include_answer", false)
+        }
+        val conn = (URL("https://api.tavily.com/search").openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15_000
+            readTimeout = 30_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Accept", "application/json")
+        }
+        conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        val code = conn.responseCode
+        val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.use { it.readText() }.orEmpty()
+        conn.disconnect()
+        if (code !in 200..299) return "搜索失败（HTTP $code）：${text.take(200)}"
+        val root = runCatching { JSONObject(text) }.getOrNull() ?: return "搜索返回格式异常"
+        val results = root.optJSONArray("results") ?: return "没有搜索结果"
+        val sb = StringBuilder()
+        for (i in 0 until minOf(results.length(), 5)) {
+            val item = results.optJSONObject(i) ?: continue
+            sb.append(i + 1).append(". ").append(item.optString("title", "").replace("null", "")).append('\n')
+            sb.append(item.optString("url", "")).append('\n')
+            sb.append(item.optString("content", "").take(600)).append("\n\n")
+        }
+        return sb.toString().trim().ifBlank { "没有搜索结果" }
+    }
+
+    fun chat(config: AgentConfig, messages: List<ChatMsg>): AssistantReply {
+        val body = JSONObject().apply {
+            put("model", config.model)
+            put("messages", buildMessages(messages))
+            put("tools", JSONArray(toolsJson(config.tavilyKey.isNotBlank())))
+            put("tool_choice", "auto")
+            put("temperature", config.temperature)
+            put("stream", false)
+            if (config.reasoningEffort != "none" && config.reasoningEffort.isNotBlank()) {
+                put("reasoning_effort", config.reasoningEffort)
+            }
+        }
+        return parse(post(config, body))
+    }
+
+    /**
+     * 流式对话（SSE）。
+     *
+     * 逐行解析 `data: {...}`，把 delta 里的 content / reasoning_content 增量回调给上层；
+     * tool_calls 也是增量下发的（id/name 只在第一段出现，arguments 分多段拼），
+     * 所以按 `index` 聚合，最后一次性返回。
+     */
+    suspend fun chatStream(
+        config: AgentConfig,
+        messages: List<ChatMsg>,
+        onDelta: suspend (content: String, reasoning: String) -> Unit,
+    ): AssistantReply {
+        val body = JSONObject().apply {
+            put("model", config.model)
+            put("messages", buildMessages(messages))
+            put("tools", JSONArray(toolsJson(config.tavilyKey.isNotBlank())))
+            put("tool_choice", "auto")
+            put("temperature", config.temperature)
+            put("stream", true)
+            if (config.reasoningEffort != "none" && config.reasoningEffort.isNotBlank()) {
+                put("reasoning_effort", config.reasoningEffort)
+            }
+        }
+        val conn = (URL(config.baseUrl.trimEnd('/') + "/chat/completions").openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 20_000
+            readTimeout = 180_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Accept", "text/event-stream")
+            // 必须显式要 identity：否则服务端可能返回 gzip，BufferedReader 读到的是压缩字节，
+            // 一行 data: 都解析不出来，表现就是"开了流式却没流式"。
+            setRequestProperty("Accept-Encoding", "identity")
+            if (config.apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer ${config.apiKey}")
+        }
+        conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        val code = conn.responseCode
+        SseDiagnostics.lastHttpStatus = code
+        SseDiagnostics.lastContentType = conn.contentType ?: "-"
+        SseDiagnostics.lastDeltaCount = 0
+        SseDiagnostics.lastError = ""
+        if (code !in 200..299) {
+            val text = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            SseDiagnostics.lastError = "HTTP $code ${text.take(160)}"
+            conn.disconnect()
+            val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull()
+            throw IllegalStateException("接口错误（HTTP $code）：${msg?.takeIf { it.isNotBlank() } ?: text.take(300)}")
+        }
+
+        data class Acc(var id: String = "", var name: String = "", val args: StringBuilder = StringBuilder())
+        val calls = LinkedHashMap<Int, Acc>()
+        val content = StringBuilder()
+        val reasoning = StringBuilder()
+
+        conn.inputStream.bufferedReader().use { reader ->
+            while (true) {
+                val line = reader.readLine() ?: break
+                if (!line.startsWith("data:")) continue
+                val payload = line.removePrefix("data:").trim()
+                if (payload.isEmpty() || payload == "[DONE]") {
+                    if (payload == "[DONE]") break else continue
+                }
+                val obj = runCatching { JSONObject(payload) }.getOrNull() ?: continue
+                val delta = obj.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
+                delta.text("content").takeIf { it.isNotEmpty() }?.let { content.append(it) }
+                delta.text("reasoning_content").ifEmpty { delta.text("reasoning") }
+                    .takeIf { it.isNotEmpty() }?.let { reasoning.append(it) }
+                delta.optJSONArray("tool_calls")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val tc = arr.optJSONObject(i) ?: continue
+                        val idx = tc.optInt("index", 0)
+                        val acc = calls.getOrPut(idx) { Acc() }
+                        tc.text("id").takeIf { it.isNotEmpty() }?.let { acc.id = it }
+                        val fn = tc.optJSONObject("function")
+                        fn?.text("name")?.takeIf { it.isNotEmpty() }?.let { acc.name = it }
+                        fn?.text("arguments")?.takeIf { it.isNotEmpty() }?.let { acc.args.append(it) }
+                    }
+                }
+                SseDiagnostics.lastDeltaCount += 1
+                onDelta(content.toString(), reasoning.toString())
+            }
+        }
+        conn.disconnect()
+        return AssistantReply(
+            content = content.toString().ifBlank { null },
+            reasoning = reasoning.toString().ifBlank { null },
+            calls = calls.toSortedMap().values.map {
+                ToolCall(it.id.ifBlank { "call_${System.nanoTime()}" }, it.name, it.args.toString())
+            },
+        )
+    }
+
+    fun summarize(config: AgentConfig, messages: List<ChatMsg>): String {
+        val prompt = ChatMsg(
+            role = "system",
+            content = "把下面的对话压缩成一份简洁摘要，保留：用户目标、已确认的结论、执行过的关键命令及其结果、未完成事项。" +
+                "不要编造，不要新增建议，直接输出摘要正文。",
+        )
+        val body = JSONObject().apply {
+            put("model", config.model)
+            put("messages", buildMessages(listOf(prompt) + messages.map { ChatMsg("user", it.content ?: "") }))
+            put("temperature", 0.2)
+            put("stream", false)
+        }
+        return parse(post(config, body)).content?.takeIf { it.isNotBlank() } ?: "（摘要生成失败）"
+    }
+
+    private fun buildMessages(messages: List<ChatMsg>): JSONArray = JSONArray().apply {
+        messages.forEach { m ->
+            put(JSONObject().apply {
+                put("role", m.role)
+                when {
+                    m.images.isNotEmpty() && m.role == "user" -> put("content", JSONArray().apply {
+                        m.content?.let { put(JSONObject().apply { put("type", "text"); put("text", it) }) }
+                        m.images.forEach { url ->
+                            put(JSONObject().apply {
+                                put("type", "image_url")
+                                put("image_url", JSONObject().put("url", url))
+                            })
+                        }
+                    })
+                    m.content != null -> put("content", m.content)
+                }
+                m.toolCalls?.let { calls ->
+                    put("tool_calls", JSONArray().apply {
+                        calls.forEach { tc ->
+                            put(JSONObject().apply {
+                                put("id", tc.id); put("type", "function")
+                                put("function", JSONObject().apply {
+                                    put("name", tc.name); put("arguments", tc.arguments)
+                                })
+                            })
+                        }
+                    })
+                }
+                m.toolCallId?.let { put("tool_call_id", it) }
+            })
+        }
+    }
+
+    private fun post(config: AgentConfig, body: JSONObject): String {
+        val url = URL(config.baseUrl.trimEnd('/') + "/chat/completions")
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 20_000
+        conn.readTimeout = 120_000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        conn.setRequestProperty("Accept", "application/json")
+        conn.setRequestProperty("Accept-Encoding", "identity")
+        if (config.apiKey.isNotBlank()) conn.setRequestProperty("Authorization", "Bearer ${config.apiKey}")
+        conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        val code = conn.responseCode
+        val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.use { it.readText() }.orEmpty()
+        conn.disconnect()
+        if (code !in 200..299) {
+            val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull()
+            throw IllegalStateException("接口错误（HTTP $code）：${msg?.takeIf { it.isNotBlank() } ?: text.take(300)}")
+        }
+        return text
+    }
+
+    private fun parse(text: String): AssistantReply {
+        val root = runCatching { JSONObject(text) }.getOrNull()
+            ?: throw IllegalStateException("接口返回不是 JSON：${text.take(200)}")
+        val message = root.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
+            ?: throw IllegalStateException("接口缺少 choices[0].message")
+        val calls = message.optJSONArray("tool_calls")?.let { arr ->
+            (0 until arr.length()).mapNotNull { i ->
+                val c = arr.optJSONObject(i) ?: return@mapNotNull null
+                val f = c.optJSONObject("function") ?: return@mapNotNull null
+                ToolCall(c.optString("id"), f.optString("name"), f.optString("arguments"))
+            }
+        }.orEmpty()
+        return AssistantReply(
+            content = message.text("content").ifBlank { null },
+            reasoning = message.text("reasoning_content").ifBlank { null }
+                ?: message.text("reasoning").ifBlank { null },
+            calls = calls,
+        )
+    }
+}
+
+// ------------------------------------------------------------------ 引擎
+
+/** 危险命令：命中就先问用户。刻意用较宽的匹配，宁可多问一次。 */
+private val DANGEROUS_PATTERNS = listOf(
+    Regex("""\brm\s+-[a-z]*r[a-z]*f\b""", RegexOption.IGNORE_CASE),
+    Regex("""\bdd\b.*\bof=/dev/block""", RegexOption.IGNORE_CASE),
+    Regex("""\bmkfs(\.\w+)?\b""", RegexOption.IGNORE_CASE),
+    Regex("""\breboot\s+edl\b""", RegexOption.IGNORE_CASE),
+    Regex("""\bfastboot\b""", RegexOption.IGNORE_CASE),
+    Regex("""\bpm\s+(uninstall|disable|disable-user)\b""", RegexOption.IGNORE_CASE),
+    Regex("""\b(wipe|format)\b.*\b(data|userdata|system)\b""", RegexOption.IGNORE_CASE),
+    Regex(""">\s*/dev/block/""", RegexOption.IGNORE_CASE),
+    Regex("""\bchmod\s+(-R\s+)?777\s+/\s*$""", RegexOption.IGNORE_CASE),
+)
+
+class AgentEngine(
+    private val context: Context,
+    private val config: AgentConfig,
+    /** 危险命令确认：返回 true 才执行。 */
+    private val confirmDanger: suspend (command: String) -> Boolean,
+    /** 会话内容有更新时回调（UI 用它刷新列表）。 */
+    private val onUpdate: suspend () -> Unit,
+) {
+
+    suspend fun send(
+        session: AgentSession,
+        userText: String,
+        images: List<String>,
+        /** true 表示 UI 已经同步插入过这条用户消息，避免重复添加。 */
+        userMessageAlreadyAdded: Boolean = false,
+    ) {
+        // 注意：本方法整体跑在 Main 调度器上，所有阻塞 IO 必须显式切到 Dispatchers.IO。
+        if (!userMessageAlreadyAdded) {
+            session.messages.add(ChatMsg("user", userText, images = images))
+        }
+        session.updatedAt = System.currentTimeMillis()
+        if (session.title == "新会话" && userText.isNotBlank()) {
+            session.title = userText.trim().replace("\n", " ").take(24)
+        }
+        onUpdate()
+
+        repeat(config.maxToolRounds) {
+            compressIfNeeded(session)
+            val messages = listOf(ChatMsg("system", config.systemPrompt)) + session.messages
+            /*
+             * 流式：先占一条空的 assistant 消息，delta 到达时原地替换最后一条，
+             * UI 靠 animateContentSize 平滑长高；非流式则等整段返回后一次写入。
+             */
+            val placeholderIndex = session.messages.size
+            session.messages.add(ChatMsg("assistant", ""))
+            val reply = try {
+                if (config.stream) {
+                    withContext(Dispatchers.IO) {
+                        AgentApi.chatStream(config, messages) { contentSoFar, reasoningSoFar ->
+                            withContext(Dispatchers.Main) {
+                                session.messages[placeholderIndex] = ChatMsg(
+                                    role = "assistant",
+                                    content = contentSoFar.ifBlank { null },
+                                    reasoning = reasoningSoFar.ifBlank { null },
+                                )
+                                onUpdate()
+                            }
+                        }
+                    }
+                } else {
+                    withContext(Dispatchers.IO) { AgentApi.chat(config, messages) }
+                }
+            } catch (e: Exception) {
+                session.messages[placeholderIndex] = ChatMsg("assistant", "请求失败：${e.message ?: e.javaClass.simpleName}")
+                session.updatedAt = System.currentTimeMillis(); onUpdate()
+                return
+            }
+            /*
+             * 兼容性兜底：有些"OpenAI 兼容"服务不实现 SSE，返回的是一整段 JSON。
+             * 这种情况 chatStream 解析不到任何 data: 行，content/calls 都是空的，
+             * 此时自动改用非流式再请求一次，而不是给用户一个空气泡。
+             */
+            val finalReply = if (config.stream && reply.content.isNullOrBlank() && reply.calls.isEmpty()) {
+                SseDiagnostics.fallbackUsed = true
+                runCatching { withContext(Dispatchers.IO) { AgentApi.chat(config, messages) } }.getOrElse { reply }
+            } else {
+                if (config.stream) SseDiagnostics.fallbackUsed = SseDiagnostics.lastDeltaCount == 0
+                reply
+            }
+            session.messages[placeholderIndex] = ChatMsg(
+                role = "assistant",
+                content = finalReply.content,
+                toolCalls = finalReply.calls.takeIf { it.isNotEmpty() },
+                reasoning = finalReply.reasoning,
+            )
+            session.updatedAt = System.currentTimeMillis(); onUpdate()
+
+            if (finalReply.calls.isEmpty()) return
+
+            for (call in finalReply.calls) {
+                val output = when (call.name) {
+                    "web_search" -> {
+                        val query = runCatching {
+                            JSONObject(call.arguments).optString("query")
+                        }.getOrDefault("")
+                        if (query.isBlank()) "参数错误：缺少 query"
+                        else withContext(Dispatchers.IO) { AgentApi.tavilySearch(config, query) }
+                    }
+                    "get_device_info" -> deviceInfo()
+                    "run_shell" -> {
+                        val command = runCatching {
+                            JSONObject(call.arguments).optString("command")
+                        }.getOrDefault("")
+                        if (command.isBlank()) {
+                            "参数错误：缺少 command"
+                        } else if (isDangerous(command) && !confirmDanger(command)) {
+                            "用户拒绝了这条命令的执行"
+                        } else {
+                            val result = withContext(Dispatchers.IO) { AgentShell.run(context, command, config.channels) }
+                            "${result.output}\n[通道=${result.channel}]"
+                        }
+                    }
+                    else -> "未知工具：${call.name}"
+                }
+                session.messages.add(ChatMsg("tool", output, toolCallId = call.id))
+                session.updatedAt = System.currentTimeMillis(); onUpdate()
+            }
+        }
+        session.messages.add(ChatMsg("assistant", "已达到单轮工具调用上限（${config.maxToolRounds} 次），先停在这里。需要继续就再发一条消息。"))
+        session.updatedAt = System.currentTimeMillis(); onUpdate()
+    }
+
+    private fun isDangerous(command: String): Boolean = DANGEROUS_PATTERNS.any { it.containsMatchIn(command) }
+
+    private fun deviceInfo(): String = buildString {
+        appendLine("型号: ${android.os.Build.MODEL}")
+        appendLine("品牌: ${android.os.Build.BRAND}")
+        appendLine("Android: ${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})")
+        appendLine("SoC: ${android.os.Build.SOC_MODEL}")
+        appendLine("ABI: ${android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "-"}")
+        append("可用通道: ").append(AgentShell.available(context).joinToString { it.label }.ifBlank { "无" })
+    }
+
+    private suspend fun compressIfNeeded(session: AgentSession) {
+        val size = session.messages.sumOf { (it.content?.length ?: 0) + (it.reasoning?.length ?: 0) }
+        if (size <= config.contextLimitChars || session.messages.size <= 6) return
+        val cut = session.messages.size - 6
+        val older = session.messages.take(cut)
+        if (older.isEmpty()) return
+        val summary = runCatching { withContext(Dispatchers.IO) { AgentApi.summarize(config, older) } }.getOrElse { "（旧消息已省略：${older.size} 条）" }
+        session.messages.subList(0, cut).clear()
+        session.messages.add(0, ChatMsg("system", "【早前对话摘要】\n$summary"))
+        session.updatedAt = System.currentTimeMillis()
+        onUpdate()
+    }
+}

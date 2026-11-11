@@ -1,0 +1,61 @@
+[versions]
+agp = "9.3.1"
+kotlin = "2.2.10"
+composeBom = "2026.06.01"
+miuix = "0.9.1"
+activityCompose = "1.13.0"
+coreKtx = "1.19.0"
+lifecycle = "2.11.0"
+navigationCompose = "2.9.8"
+datastore = "1.2.1"
+coroutines = "1.11.0"
+json = "20260719"
+exifinterface = "1.4.1"
+shizuku = "13.1.5"
+dhizuku = "2.6.0"
+zxing = "3.5.3"
+# 注意：Cloudy 0.7.1+ 是用 Kotlin 2.4.0 编译的（class 元数据 mv=[2,4,0]），
+# 本工程 Kotlin 2.2.10 最高只能读到 2.3.0，会报 "incompatible version of Kotlin"。
+# 0.6.1 的元数据是 [2,3,0]，且同样具备 Sky 背景模糊与 cpuBlurEnabled 参数，
+# 因此在升级工程 Kotlin 之前必须锁在 0.6.x。
+cloudy = "0.6.1"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
+androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
+androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+# EXIF 读写（图片元数据查看与清理）。平台自带的 android.media.ExifInterface 删除标签
+# 需要重编码，androidx 版能原地改元数据段，所以这里显式引入。
+androidx-exifinterface = { group = "androidx.exifinterface", name = "exifinterface", version.ref = "exifinterface" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+junit = { group = "junit", name = "junit", version = "4.13.2" }
+json = { group = "org.json", name = "json", version.ref = "json" }
+shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
+shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
+dhizuku-api = { group = "io.github.iamr0s", name = "Dhizuku-API", version.ref = "dhizuku" }
+zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
+
+compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+compose-ui = { group = "androidx.compose.ui", name = "ui" }
+compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+compose-foundation = { group = "androidx.compose.foundation", name = "foundation" }
+# Material 图标集：**只为了官方圆钩图标**（Icons.Rounded.CheckCircleOutline），
+# 不是把 Material UI 库加回来。core 包只有实心的 CheckCircle，
+# 截图里那种"空心圆环 + 勾"只有 extended 里才有。
+# 它只依赖 material-icons-core + compose.ui，不会拖进 material3 / material-ripple。
+compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
+cloudy = { module = "com.github.skydoves:cloudy", version.ref = "cloudy" }
+
+miuix-ui = { group = "top.yukonga.miuix.kmp", name = "miuix-ui", version.ref = "miuix" }
+miuix-preference = { group = "top.yukonga.miuix.kmp", name = "miuix-preference", version.ref = "miuix" }
+miuix-icons = { group = "top.yukonga.miuix.kmp", name = "miuix-icons", version.ref = "miuix" }
+miuix-blur = { group = "top.yukonga.miuix.kmp", name = "miuix-blur", version.ref = "miuix" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

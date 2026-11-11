@@ -1,0 +1,23 @@
+# Gradle / IDE
+.gradle/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+.kotlin/
+
+# 构建产物
+dist/
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# 签名配置（含密码，绝不入库）
+keystore.properties
+
+# 临时文件
+MainActivity.new.kt
+*.log
+.DS_Store
