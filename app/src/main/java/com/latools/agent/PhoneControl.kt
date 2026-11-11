@@ -135,9 +135,16 @@ object PhoneControl {
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
-        ).apply { gravity = Gravity.TOP or Gravity.START }
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            }
+        }
             runCatching {
                 wm.addView(view, params)
                 overlay = view
@@ -258,9 +265,18 @@ object PhoneControl {
             color = Color.parseColor("#40C4FF")
         }
 
-        /** 追加一次点击光晕（屏幕坐标，画布坐标与屏幕一致，因为 overlay 是 full-screen LAYOUT_IN_SCREEN）。 */
-        fun addTap(x: Float, y: Float) {
-            taps += Triple(x, y, System.currentTimeMillis())
+        /**
+         * 追加一次点击光晕。
+         *
+         * 传入的是**屏幕坐标**（dispatchGesture 的坐标系），但画布坐标的原点是 View 左上角。
+         * overlay 即使加了 FLAG_LAYOUT_IN_SCREEN，实际也不一定从 y=0 开始（部分 ROM 会把它
+         * 排到状态栏下面），于是光球整体偏下。这里用 getLocationOnScreen 实测偏移再换算，
+         * 不管系统怎么排都能对上。
+         */
+        fun addTap(screenX: Float, screenY: Float) {
+            val loc = IntArray(2)
+            getLocationOnScreen(loc)
+            taps += Triple(screenX - loc[0], screenY - loc[1], System.currentTimeMillis())
             invalidate()
         }
         private var phase = 0f
