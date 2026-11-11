@@ -64,7 +64,7 @@ class AgentAccessibilityService : AccessibilityService() {
         val stroke = GestureDescription.StrokeDescription(path, 0, 60)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         val dispatched = dispatchGesture(gesture, null, null)
-        if (dispatched) PhoneControl.showTap(applicationContext, x, y)
+        if (dispatched) PhoneControl.showTap(x, y)
         return dispatched
     }
 

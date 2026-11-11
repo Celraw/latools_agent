@@ -35,6 +35,7 @@ object PhoneControl {
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var service: AgentAccessibilityService? = null
     private var overlay: View? = null
+    private var neonView: NeonBorderView? = null
     private var windowManager: WindowManager? = null
 
     fun onServiceReady(service: AgentAccessibilityService) {
@@ -78,28 +79,42 @@ object PhoneControl {
      * 每次点击给一个短暂的可视反馈，用户才能判断"它是不是点歪了/点错了"，
      * 也才有依据决定要不要立刻按音量键中止。
      */
-    fun showTap(context: Context, x: Float, y: Float) {
+    fun showTap(x: Float, y: Float) {
         if (!isActive) return
         mainHandler.post {
-            val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return@post
-        val sizePx = (56 * context.resources.displayMetrics.density).toInt()
-            val view = TapRippleView(context)
+            /*
+             * 关键：优先画在**霓虹边框那个 overlay 窗口**里。
+             * 之前每次点击都 new 一个新窗口 + addView：
+             *  · 用的是 applicationContext 的 WindowManager，TYPE_ACCESSIBILITY_OVERLAY 会被拒（BadToken）→ 光晕永远不出现
+             *  · 每次点击新建/销毁窗口，开销大且在动画期间容易丢帧
+             * 同一个 overlay 里画，既不会拿错 token，也没有额外窗口开销。
+             */
+            val view = neonView
+            if (view != null) {
+                view.addTap(x, y)
+                return@post
+            }
+            // 兜底：理论上不会走到（showTap 只在操控中存在），留一条独立窗口路径
+            val svc = service ?: return@post
+            val wm = svc.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return@post
+            val sizePx = (56 * svc.resources.displayMetrics.density).toInt()
+            val fallback = TapRippleView(svc)
             val params = WindowManager.LayoutParams(
                 sizePx, sizePx,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT,
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            this.x = (x - sizePx / 2f).toInt()
-            this.y = (y - sizePx / 2f).toInt()
-        }
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT,
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                this.x = (x - sizePx / 2f).toInt()
+                this.y = (y - sizePx / 2f).toInt()
+            }
             runCatching {
-                wm.addView(view, params)
-                view.start {
-                    mainHandler.post { runCatching { wm.removeView(view) } }
+                wm.addView(fallback, params)
+                fallback.start {
+                    mainHandler.post { runCatching { wm.removeView(fallback) } }
                 }
             }
         }
@@ -126,6 +141,7 @@ object PhoneControl {
             runCatching {
                 wm.addView(view, params)
                 overlay = view
+                neonView = view
                 windowManager = wm
             }
         }
@@ -135,6 +151,7 @@ object PhoneControl {
         mainHandler.post {
             overlay?.let { view -> runCatching { windowManager?.removeView(view) } }
             overlay = null
+            neonView = null
             windowManager = null
         }
     }
@@ -231,6 +248,21 @@ object PhoneControl {
         }
         private val rect = RectF()
         private val shaderMatrix = android.graphics.Matrix()
+
+        // 正在播放的点击光晕：(x, y, 开始时间)
+        private val taps = mutableListOf<Triple<Float, Float, Long>>()
+        private val tapFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        private val tapRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = dp(2f)
+            color = Color.parseColor("#40C4FF")
+        }
+
+        /** 追加一次点击光晕（屏幕坐标，画布坐标与屏幕一致，因为 overlay 是 full-screen LAYOUT_IN_SCREEN）。 */
+        fun addTap(x: Float, y: Float) {
+            taps += Triple(x, y, System.currentTimeMillis())
+            invalidate()
+        }
         private var phase = 0f
         private var shader: android.graphics.SweepGradient? = null
 
@@ -271,6 +303,40 @@ object PhoneControl {
             canvas.drawRoundRect(rect, radius, radius, glowPaint)
             canvas.drawRoundRect(rect, radius, radius, midPaint)
             canvas.drawRoundRect(rect, radius, radius, corePaint)
+
+            drawTaps(canvas)
+        }
+
+        /** 每个光晕 620ms：径向蓝色渐变扩散 + 描边，结束自动移除。 */
+        private fun drawTaps(canvas: Canvas) {
+            if (taps.isEmpty()) return
+            val now = System.currentTimeMillis()
+            val iterator = taps.iterator()
+            while (iterator.hasNext()) {
+                val (tx, ty, started) = iterator.next()
+                val progress = ((now - started) / 620f).coerceIn(0f, 1f)
+                if (progress >= 1f) {
+                    iterator.remove()
+                    continue
+                }
+                val maxR = dp(34f)
+                val radiusPx = maxR * (0.35f + 0.65f * progress)
+                val alpha = ((1f - progress) * 235).toInt().coerceIn(0, 255)
+                tapFill.shader = android.graphics.RadialGradient(
+                    tx, ty, radiusPx,
+                    intArrayOf(
+                        Color.argb(alpha, 64, 196, 255),
+                        Color.argb((alpha * 0.55f).toInt(), 41, 121, 255),
+                        Color.argb(0, 41, 121, 255),
+                    ),
+                    floatArrayOf(0f, 0.55f, 1f),
+                    android.graphics.Shader.TileMode.CLAMP,
+                )
+                canvas.drawCircle(tx, ty, radiusPx, tapFill)
+                tapRing.alpha = (alpha * 0.9f).toInt()
+                canvas.drawCircle(tx, ty, radiusPx, tapRing)
+            }
+            if (taps.isNotEmpty()) postInvalidateOnAnimation()
         }
 
         private fun dp(v: Float): Float = v * resources.displayMetrics.density
