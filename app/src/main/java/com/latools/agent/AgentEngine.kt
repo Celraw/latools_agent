@@ -156,69 +156,7 @@ data class AssistantReply(val content: String?, val reasoning: String?, val call
  */
 object AgentApi {
 
-    private fun toolsJson(includeSearch: Boolean): String = JSONArray().apply {
-            put(JSONObject().apply {
-                put("type", "function")
-                put("function", JSONObject().apply {
-                    put("name", "run_shell")
-                    put("description", "在本机以特权身份执行一条 shell 命令，返回 stdout/stderr 与退出码。")
-                    put("parameters", JSONObject().apply {
-                        put("type", "object")
-                        put("properties", JSONObject().apply {
-                            put("command", JSONObject().apply {
-                                put("type", "string")
-                                put("description", "要执行的完整 shell 命令")
-                            })
-                        })
-                        put("required", JSONArray().put("command"))
-                    })
-                })
-            })
-            put(JSONObject().apply {
-                put("type", "function")
-                put("function", JSONObject().apply {
-                    put("name", "get_device_info")
-                    put("description", "读取设备基础信息（型号、系统版本、SoC、当前特权通道）。")
-                    put("parameters", JSONObject().apply { put("type", "object"); put("properties", JSONObject()) })
-                })
-            })
-        put(JSONObject().apply {
-            put("type", "function")
-            put("function", JSONObject().apply {
-                put("name", "fetch_url")
-                put("description", "直接访问一个 http/https 网址并返回正文（HTML 会转成纯文本）。适合打开具体文档页、API 响应或搜索结果里的链接。")
-                put("parameters", JSONObject().apply {
-                    put("type", "object")
-                    put("properties", JSONObject().apply {
-                        put("url", JSONObject().apply {
-                            put("type", "string")
-                            put("description", "完整 URL，必须以 http:// 或 https:// 开头")
-                        })
-                    })
-                    put("required", JSONArray().put("url"))
-                })
-            })
-        })
-        if (includeSearch) {
-            put(JSONObject().apply {
-                put("type", "function")
-                put("function", JSONObject().apply {
-                    put("name", "web_search")
-                    put("description", "联网搜索最新信息（Tavily）。需要实时资讯、文档版本、新闻时使用。")
-                    put("parameters", JSONObject().apply {
-                        put("type", "object")
-                        put("properties", JSONObject().apply {
-                            put("query", JSONObject().apply {
-                                put("type", "string")
-                                put("description", "搜索关键词，尽量具体")
-                            })
-                        })
-                        put("required", JSONArray().put("query"))
-                    })
-                })
-            })
-        }
-    }.toString()
+    private fun toolsJson(includeSearch: Boolean): String = AgentTools.toolsJson(includeSearch)
 
     /**
      * 直接抓取一个 URL 的正文。
@@ -518,19 +456,6 @@ object AgentApi {
 
 // ------------------------------------------------------------------ 引擎
 
-/** 危险命令：命中就先问用户。刻意用较宽的匹配，宁可多问一次。 */
-private val DANGEROUS_PATTERNS = listOf(
-    Regex("""\brm\s+-[a-z]*r[a-z]*f\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bdd\b.*\bof=/dev/block""", RegexOption.IGNORE_CASE),
-    Regex("""\bmkfs(\.\w+)?\b""", RegexOption.IGNORE_CASE),
-    Regex("""\breboot\s+edl\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bfastboot\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bpm\s+(uninstall|disable|disable-user)\b""", RegexOption.IGNORE_CASE),
-    Regex("""\b(wipe|format)\b.*\b(data|userdata|system)\b""", RegexOption.IGNORE_CASE),
-    Regex(""">\s*/dev/block/""", RegexOption.IGNORE_CASE),
-    Regex("""\bchmod\s+(-R\s+)?777\s+/\s*$""", RegexOption.IGNORE_CASE),
-)
-
 class AgentEngine(
     private val context: Context,
     private val config: AgentConfig,
@@ -610,39 +535,19 @@ class AgentEngine(
 
             if (finalReply.calls.isEmpty()) return
 
+            val pendingImages = mutableListOf<String>()
             for (call in finalReply.calls) {
-                val output = when (call.name) {
-                    "fetch_url" -> {
-                        val url = runCatching {
-                            JSONObject(call.arguments).optString("url")
-                        }.getOrDefault("")
-                        if (url.isBlank()) "参数错误：缺少 url"
-                        else withContext(Dispatchers.IO) { AgentApi.fetchUrl(url) }
-                    }
-                    "web_search" -> {
-                        val query = runCatching {
-                            JSONObject(call.arguments).optString("query")
-                        }.getOrDefault("")
-                        if (query.isBlank()) "参数错误：缺少 query"
-                        else withContext(Dispatchers.IO) { AgentApi.tavilySearch(config, query) }
-                    }
-                    "get_device_info" -> deviceInfo()
-                    "run_shell" -> {
-                        val command = runCatching {
-                            JSONObject(call.arguments).optString("command")
-                        }.getOrDefault("")
-                        if (command.isBlank()) {
-                            "参数错误：缺少 command"
-                        } else if (isDangerous(command) && !confirmDanger(command)) {
-                            "用户拒绝了这条命令的执行"
-                        } else {
-                            val result = withContext(Dispatchers.IO) { AgentShell.run(context, command, config.channels) }
-                            "${result.output}\n[通道=${result.channel}]"
-                        }
-                    }
-                    else -> "未知工具：${call.name}"
+                var output = withContext(Dispatchers.IO) { AgentTools.execute(context, config, call, ::deviceInfo, confirmDanger) }
+                // 图片类工具（screenshot）以标记返回，转成一条带图的用户消息，模型才"看得见"
+                if (output.startsWith(AgentTools.IMAGE_MARKER)) {
+                    pendingImages += output.removePrefix(AgentTools.IMAGE_MARKER)
+                    output = "已截图，图片见下一条消息。"
                 }
                 session.messages.add(ChatMsg("tool", output, toolCallId = call.id))
+                session.updatedAt = System.currentTimeMillis(); onUpdate()
+            }
+            if (pendingImages.isNotEmpty()) {
+                session.messages.add(ChatMsg("user", "工具截图：", images = pendingImages))
                 session.updatedAt = System.currentTimeMillis(); onUpdate()
             }
         }
@@ -650,7 +555,6 @@ class AgentEngine(
         session.updatedAt = System.currentTimeMillis(); onUpdate()
     }
 
-    private fun isDangerous(command: String): Boolean = DANGEROUS_PATTERNS.any { it.containsMatchIn(command) }
 
     private fun deviceInfo(): String = buildString {
         appendLine("型号: ${android.os.Build.MODEL}")

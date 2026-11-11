@@ -905,7 +905,11 @@ private fun ToolCard(call: ToolCall, output: String, open: Boolean, onToggle: ()
             val obj = JSONObject(call.arguments)
             when (call.name) {
                 "web_search" -> obj.optString("query")
-                "get_device_info" -> ""
+                "fetch_url" -> obj.optString("url")
+                "http_request" -> obj.optString("method").ifBlank { "GET" } + " " + obj.optString("url")
+                "open_app" -> obj.optString("package")
+                "clipboard_set" -> obj.optString("text").take(80)
+                "clipboard_get", "screenshot", "get_device_info" -> ""
                 else -> obj.optString("command")
             }
         }.getOrDefault("")
