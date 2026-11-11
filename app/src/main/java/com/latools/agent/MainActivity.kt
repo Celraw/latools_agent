@@ -1129,6 +1129,7 @@ private fun SettingsPanel(
     var streamOut by remember { mutableStateOf(config.stream) }
     var tavilyKey by remember { mutableStateOf(config.tavilyKey) }
     var visionEnabled by remember { mutableStateOf(config.visionEnabled) }
+    val context = LocalContext.current
     // 无障碍服务连接状态：每次进入设置页刷新一次
     var accessibilityOn by remember { mutableStateOf(AgentAccessibilityService.isConnected()) }
     LaunchedEffect(Unit) { accessibilityOn = AgentAccessibilityService.isConnected() }
@@ -1199,7 +1200,7 @@ private fun SettingsPanel(
                     }
                     Box(
                         Modifier.size(46.dp, 28.dp).clip(RoundedCornerShape(999.dp))
-                            .background(if (visionEnabled) Primary else SurfaceHi)
+                            .background(if (visionEnabled) Primary else Surface2)
                             .clickable { visionEnabled = !visionEnabled },
                         contentAlignment = if (visionEnabled) Alignment.CenterEnd else Alignment.CenterStart,
                     ) {
