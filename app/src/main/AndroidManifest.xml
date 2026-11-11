@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
     <uses-permission android:name="com.rosan.dhizuku.permission.API" />
     <application
@@ -28,6 +32,12 @@
             android:exported="true"
             android:multiprocess="false" />
 
+
+        <!-- 任务期间保活 -->
+        <service
+            android:name=".AgentGuardService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- AI 手机操控：截图 + 手势 + 音量键急停 -->
         <service

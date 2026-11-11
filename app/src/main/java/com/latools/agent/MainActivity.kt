@@ -149,6 +149,14 @@ private fun AgentApp() {
     var channels by remember { mutableStateOf<List<AgentChannel>>(emptyList()) }
     var messageAction by remember { mutableStateOf<Pair<ChatMsg, Int>?>(null) }
     var job by remember { mutableStateOf<Job?>(null) }
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { }
+    LaunchedEffect(Unit) {
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            runCatching { notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS) }
+        }
+    }
     /*
      * 返回键只做「先关页面、再退出」；预测性返回的动画交给 AOSP 默认实现
      * （Manifest 里 enableOnBackInvokedCallback=true，系统会在滑动时给 Activity
@@ -194,6 +202,7 @@ private fun AgentApp() {
         session.messages.add(ChatMsg("user", body, images = images))
         session.updatedAt = System.currentTimeMillis()
         version++
+        AgentGuardService.start(context)
         job = scope.launch {
             val engine = AgentEngine(
                 context = context,
@@ -213,6 +222,8 @@ private fun AgentApp() {
                 busy = false
                 version++
                 job = null
+                // 手机操控还在进行时不能停保活，交给 PhoneControl 结束时收尾
+                if (!PhoneControl.isActive) AgentGuardService.stop(context)
             }
         }
     }
@@ -363,6 +374,7 @@ private fun AgentApp() {
                     job = null
                     busy = false
                     version++
+                    if (!PhoneControl.isActive) AgentGuardService.stop(context)
                 },
             )
         }
@@ -1218,6 +1230,42 @@ private fun SettingsPanel(
                 }
                 Spacer(Modifier.height(8.dp))
                 T("执行时按 ROOT → Shizuku → Dhizuku 顺序尝试，命中第一个可用通道。", 11.sp, TextFaint)
+            }
+
+            SectionLabel("后台保活")
+            WhiteCard {
+                val powerManager = context.getSystemService(android.os.PowerManager::class.java)
+                val ignoring = powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        T("电池优化", 13.sp, TextMain, FontWeight.SemiBold)
+                        Spacer(Modifier.height(2.dp))
+                        T(
+                            if (ignoring) "已豁免，后台不易被杀" else "未豁免，长任务可能被系统中断",
+                            11.sp, if (ignoring) Ok else TextFaint,
+                        )
+                    }
+                    if (!ignoring) {
+                        Box(
+                            Modifier.clip(RoundedCornerShape(10.dp)).background(Surface2)
+                                .clickable {
+                                    runCatching {
+                                        val intent = android.content.Intent(
+                                            android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                            android.net.Uri.parse("package:${context.packageName}"),
+                                        ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        context.startActivity(intent)
+                                    }
+                                }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                        ) { T("去豁免", 12.sp, Primary) }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                T(
+                    "Agent 执行任务时会启动前台服务保活；没有任务时会自动停止，不做常驻。",
+                    11.sp, TextFaint,
+                )
             }
 
             SectionLabel("手机操控")

@@ -32,6 +32,7 @@ object PhoneControl {
     var isActive: Boolean = false
         private set
 
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var service: AgentAccessibilityService? = null
     private var overlay: View? = null
     private var windowManager: WindowManager? = null
@@ -51,7 +52,8 @@ object PhoneControl {
         val svc = service ?: return false
         if (isActive) return true
         isActive = true
-        showBorder(context, svc)
+        showBorder(svc)
+        AgentGuardService.start(context)
         return true
     }
 
@@ -59,6 +61,7 @@ object PhoneControl {
     fun stop(context: Context? = null) {
         isActive = false
         hideBorder()
+        context?.let { AgentGuardService.stop(it) }
     }
 
     /** 用户主动中止（音量键 / 通知 / 界面按钮）。 */
@@ -77,11 +80,12 @@ object PhoneControl {
      */
     fun showTap(context: Context, x: Float, y: Float) {
         if (!isActive) return
-        val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return
+        mainHandler.post {
+            val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return@post
         val sizePx = (56 * context.resources.displayMetrics.density).toInt()
-        val view = TapRippleView(context)
-        val params = WindowManager.LayoutParams(
-            sizePx, sizePx,
+            val view = TapRippleView(context)
+            val params = WindowManager.LayoutParams(
+                sizePx, sizePx,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
@@ -92,20 +96,24 @@ object PhoneControl {
             this.x = (x - sizePx / 2f).toInt()
             this.y = (y - sizePx / 2f).toInt()
         }
-        runCatching {
-            wm.addView(view, params)
-            view.start {
-                runCatching { wm.removeView(view) }
+            runCatching {
+                wm.addView(view, params)
+                view.start {
+                    mainHandler.post { runCatching { wm.removeView(view) } }
+                }
             }
         }
     }
 
     // ------------------------------------------------------------ 霓虹边框
 
-    private fun showBorder(context: Context, svc: AgentAccessibilityService) {
+    private fun showBorder(svc: AgentAccessibilityService) {
         if (overlay != null) return
-        val wm = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return
-        val view = NeonBorderView(context)
+        // TYPE_ACCESSIBILITY_OVERLAY 必须用 AccessibilityService 的 window token，
+        // 且 View 的创建/addView 都必须在主线程 —— 之前从工具执行线程直接 addView 会闪退。
+        mainHandler.post {
+            val wm = svc.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return@post
+            val view = NeonBorderView(svc)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -115,17 +123,20 @@ object PhoneControl {
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT,
         ).apply { gravity = Gravity.TOP or Gravity.START }
-        runCatching {
-            wm.addView(view, params)
-            overlay = view
-            windowManager = wm
+            runCatching {
+                wm.addView(view, params)
+                overlay = view
+                windowManager = wm
+            }
         }
     }
 
     private fun hideBorder() {
-        overlay?.let { view -> runCatching { windowManager?.removeView(view) } }
-        overlay = null
-        windowManager = null
+        mainHandler.post {
+            overlay?.let { view -> runCatching { windowManager?.removeView(view) } }
+            overlay = null
+            windowManager = null
+        }
     }
 
     /** 单次点击的蓝色渐变光晕：扩散 + 淡出，约 600ms 后自毁。 */
