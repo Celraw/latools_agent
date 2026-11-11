@@ -90,6 +90,32 @@ object AgentTools {
             "screenshot", "截取当前屏幕并作为图片交给模型查看。",
             JSONObject(), emptyList(),
         )
+        fn(
+            "read_file", "读取一个文本文件的内容（自动截断，超大文件只返回开头）。应用无权读取的路径会尝试用特权通道 cat。",
+            JSONObject().put("path", p("string", "文件的绝对路径")), listOf("path"),
+        )
+        fn(
+            "write_file", "把文本写入文件。只允许写入本应用目录（files / Android/data），其它路径请用 run_shell。",
+            JSONObject()
+                .put("path", p("string", "目标绝对路径，必须在应用目录内"))
+                .put("content", p("string", "要写入的文本内容"))
+                .put("append", p("boolean", "可选，true 表示追加而不是覆盖")),
+            listOf("path", "content"),
+        )
+        fn(
+            "list_packages", "列出已安装应用（包名）。默认只列第三方应用。",
+            JSONObject()
+                .put("filter", p("string", "可选，按包名子串过滤"))
+                .put("include_system", p("boolean", "可选，是否包含系统应用，默认 false")),
+            emptyList(),
+        )
+        fn(
+            "app_control", "对指定应用执行操作：force-stop（强停）/ disable（禁用）/ enable（启用）/ clear（清除数据）/ suspend（挂起）/ unsuspend（恢复）。",
+            JSONObject()
+                .put("package", p("string", "应用包名"))
+                .put("action", p("string", "force-stop / disable / enable / clear / suspend / unsuspend")),
+            listOf("package", "action"),
+        )
         if (includeSearch) {
             fn(
                 "web_search", "联网搜索最新信息（Tavily）。",
@@ -150,6 +176,26 @@ object AgentTools {
             }
             "open_app" -> openApp(context, args.optString("package"))
             "screenshot" -> screenshot(context, config)
+            "read_file" -> readFile(context, config, args.optString("path"))
+            "write_file" -> writeFile(
+                context,
+                args.optString("path"),
+                args.optString("content"),
+                args.optBoolean("append", false),
+            )
+            "list_packages" -> listPackages(
+                context,
+                config,
+                args.optString("filter"),
+                args.optBoolean("include_system", false),
+            )
+            "app_control" -> appControl(
+                context,
+                config,
+                args.optString("package"),
+                args.optString("action"),
+                confirmDanger,
+            )
             else -> "未知工具：${call.name}"
         }
     }
@@ -192,6 +238,87 @@ object AgentTools {
         } finally {
             conn.disconnect()
         }
+    }
+
+    /** shell 单引号转义：' -> '\'' */
+    private fun shq(text: String): String = "'" + text.replace("'", "'\\''") + "'"
+
+    private suspend fun readFile(context: Context, config: AgentConfig, path: String): String {
+        if (path.isBlank()) return "参数错误：缺少 path"
+        val direct = runCatching {
+            val f = java.io.File(path)
+            if (!f.isFile) return@runCatching null
+            if (f.length() > 2 * 1024 * 1024) return@runCatching null
+            f.readText()
+        }.getOrNull()
+        val text = direct ?: run {
+            val r = AgentShell.run(context, "cat -- ${shq(path)} 2>/dev/null | head -c 200000", config.channels, 15_000)
+            if (r.output.startsWith("（无输出）") || r.output.isBlank()) {
+                return "读取失败：文件不存在或无权访问（$path）"
+            }
+            r.output.substringBeforeLast("\n[exit=")
+        }
+        return if (text.length > 20_000) text.take(20_000) + "\n…（已截断，原长 ${text.length} 字符）" else text
+    }
+
+    private fun writeFile(context: Context, path: String, content: String, append: Boolean): String {
+        if (path.isBlank()) return "参数错误：缺少 path"
+        val allowedRoots = listOfNotNull(
+            context.filesDir?.absolutePath,
+            context.cacheDir?.absolutePath,
+            context.getExternalFilesDir(null)?.absolutePath,
+        )
+        if (allowedRoots.none { path.startsWith(it) }) {
+            return "拒绝写入：只允许写应用目录（${allowedRoots.joinToString(" / ")}）。其它路径请用 run_shell 并自行确认风险。"
+        }
+        return runCatching {
+            val f = java.io.File(path)
+            f.parentFile?.mkdirs()
+            if (append) f.appendText(content) else f.writeText(content)
+            "已写入 ${content.length} 字符到 $path" + if (append) "（追加）" else "（覆盖）"
+        }.getOrElse { "写入失败：${it.message ?: it.javaClass.simpleName}" }
+    }
+
+    private suspend fun listPackages(
+        context: Context,
+        config: AgentConfig,
+        filter: String,
+        includeSystem: Boolean,
+    ): String {
+        val cmd = "pm list packages" + (if (includeSystem) "" else " -3")
+        val r = AgentShell.run(context, cmd, config.channels, 20_000)
+        val names = r.output.lines()
+            .filter { it.startsWith("package:") }
+            .map { it.removePrefix("package:").trim() }
+        var list = names
+        if (filter.isNotBlank()) list = list.filter { it.contains(filter, ignoreCase = true) }
+        if (list.isEmpty()) return "没有匹配的应用（原始输出：${r.output.take(200)}）"
+        return "共 ${list.size} 个：\n" + list.sorted().take(300).joinToString("\n")
+    }
+
+    private suspend fun appControl(
+        context: Context,
+        config: AgentConfig,
+        pkg: String,
+        action: String,
+        confirmDanger: suspend (String) -> Boolean,
+    ): String {
+        if (pkg.isBlank()) return "参数错误：缺少 package"
+        val cmd = when (action) {
+            "force-stop" -> "am force-stop ${shq(pkg)}"
+            "disable" -> "pm disable-user --user 0 ${shq(pkg)}"
+            "enable" -> "pm enable ${shq(pkg)}"
+            "clear" -> "pm clear --user 0 ${shq(pkg)}"
+            "suspend" -> "pm suspend --user 0 ${shq(pkg)}"
+            "unsuspend" -> "pm unsuspend --user 0 ${shq(pkg)}"
+            else -> return "未知动作：$action（可用：force-stop / disable / enable / clear / suspend / unsuspend）"
+        }
+        // 破坏性动作先确认
+        if (action == "clear" || action == "disable") {
+            if (!confirmDanger("app_control: $action $pkg\n$cmd")) return "用户拒绝了这个操作"
+        }
+        val r = AgentShell.run(context, cmd, config.channels, 20_000)
+        return "$action $pkg\n${r.output}\n[通道=${r.channel}]"
     }
 
     private fun openApp(context: Context, pkg: String): String {

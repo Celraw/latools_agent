@@ -909,6 +909,9 @@ private fun ToolCard(call: ToolCall, output: String, open: Boolean, onToggle: ()
                 "http_request" -> obj.optString("method").ifBlank { "GET" } + " " + obj.optString("url")
                 "open_app" -> obj.optString("package")
                 "clipboard_set" -> obj.optString("text").take(80)
+                "read_file", "write_file" -> obj.optString("path")
+                "list_packages" -> obj.optString("filter")
+                "app_control" -> obj.optString("action") + " " + obj.optString("package")
                 "clipboard_get", "screenshot", "get_device_info" -> ""
                 else -> obj.optString("command")
             }
