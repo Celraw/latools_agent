@@ -187,37 +187,59 @@ object PhoneControl {
         private fun dp(v: Float) = v * resources.displayMetrics.density
     }
 
-    /** 四周霓虹光带：外发光 + 锐利内边，颜色沿线缓慢流动。 */
+    /**
+     * 四周霓虹光带：真正的「炫彩循环」。
+     *
+     * 之前是叠 4 个不同颜色的圆角矩形 + 只改 alpha，视觉上是静态的紫粉混色，
+     * 不是用户要的流动彩虹。现在改用 [SweepGradient]：七色沿圆周均匀分布，
+     * 再用 Matrix 每帧旋转 shader，颜色就会沿着屏幕边缘连续流动。
+     *
+     * 三层结构：
+     *  · glow：粗描边 + BlurMaskFilter，做出外溢光晕
+     *  · mid ：中等描边，鲜明的主体色带
+     *  · core：细白描边，保证在浅色界面也看得出边界
+     */
     private class NeonBorderView(context: Context) : View(context) {
+
+        private val rainbow = intArrayOf(
+            Color.parseColor("#FF1744"), // 红
+            Color.parseColor("#FF9100"), // 橙
+            Color.parseColor("#FFEA00"), // 黄
+            Color.parseColor("#00E676"), // 绿
+            Color.parseColor("#00E5FF"), // 青
+            Color.parseColor("#2979FF"), // 蓝
+            Color.parseColor("#D500F9"), // 紫
+            Color.parseColor("#FF1744"), // 首尾同色，保证循环无缝
+        )
 
         private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = dp(18f)
-            color = Color.parseColor("#7C4DFF")
-            alpha = 60
-            maskFilter = android.graphics.BlurMaskFilter(dp(16f), android.graphics.BlurMaskFilter.Blur.NORMAL)
+            strokeWidth = dp(20f)
+            alpha = 105
+            maskFilter = android.graphics.BlurMaskFilter(dp(18f), android.graphics.BlurMaskFilter.Blur.NORMAL)
         }
         private val midPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = dp(6f)
-            color = Color.parseColor("#00E5FF")
-            alpha = 150
+            strokeWidth = dp(5f)
+            alpha = 215
         }
         private val corePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = dp(2f)
+            strokeWidth = dp(1.5f)
             color = Color.WHITE
-            alpha = 210
+            alpha = 180
         }
         private val rect = RectF()
+        private val shaderMatrix = android.graphics.Matrix()
         private var phase = 0f
+        private var shader: android.graphics.SweepGradient? = null
 
         init {
-            // 呼吸/流动：只改 alpha 与色相，不重建图层
-            val animator = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 2600L
+            // 线性匀速旋转：0→1 一圈，无缝衔接下一圈
+            android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 3200L
                 repeatCount = android.animation.ValueAnimator.INFINITE
-                repeatMode = android.animation.ValueAnimator.REVERSE
+                interpolator = android.view.animation.LinearInterpolator()
                 addUpdateListener {
                     phase = it.animatedValue as Float
                     invalidate()
@@ -226,33 +248,32 @@ object PhoneControl {
             }
         }
 
+        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+            super.onSizeChanged(w, h, oldw, oldh)
+            shader = android.graphics.SweepGradient(
+                w / 2f, h / 2f, rainbow, null,
+            )
+            glowPaint.shader = shader
+            midPaint.shader = shader
+        }
+
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
-            val inset = dp(6f)
+            val s = shader ?: return
+            val inset = dp(8f)
             rect.set(inset, inset, width - inset, height - inset)
-            val radius = dp(28f)
-            val pulse = 0.55f + 0.45f * phase
-            glowPaint.alpha = (40 + 70 * pulse).toInt()
-            midPaint.alpha = (90 + 90 * pulse).toInt()
-            // 四段渐变色：紫 → 青 → 蓝 → 品红
-            val colors = intArrayOf(
-                Color.parseColor("#7C4DFF"),
-                Color.parseColor("#00E5FF"),
-                Color.parseColor("#2979FF"),
-                Color.parseColor("#FF4081"),
-            )
-            for (i in colors.indices) {
-                val shift = (i + phase).toInt() % colors.size
-                midPaint.color = colors[shift]
-                val t = i * 0.12f
-                rect.inset(-dp(2f) * t, -dp(2f) * t)
-                canvas.drawRoundRect(rect, radius, radius, glowPaint)
-                canvas.drawRoundRect(rect, radius, radius, midPaint)
-            }
-            rect.set(inset, inset, width - inset, height - inset)
+            val radius = dp(30f)
+
+            // 旋转 shader，让颜色沿边缘流动
+            shaderMatrix.setRotate(phase * 360f, width / 2f, height / 2f)
+            s.setLocalMatrix(shaderMatrix)
+
+            canvas.drawRoundRect(rect, radius, radius, glowPaint)
+            canvas.drawRoundRect(rect, radius, radius, midPaint)
             canvas.drawRoundRect(rect, radius, radius, corePaint)
         }
 
         private fun dp(v: Float): Float = v * resources.displayMetrics.density
+
     }
 }
