@@ -125,17 +125,19 @@ object AgentTools {
             fn("phone_control_stop", "结束手机操控并关闭霓虹边框。", JSONObject(), emptyList())
             fn("screen_snapshot", "截取当前屏幕作为图片查看（需要已开始手机操控）。", JSONObject(), emptyList())
             fn(
-                "tap", "在屏幕坐标处点击（需要已开始手机操控）。坐标基于截图像素。",
+                "tap",
+                "点击屏幕。推荐传 0~1 的相对坐标（x=0.5 表示屏幕水平中央），避免图片被接口缩放导致的像素偏差；也可以传绝对像素。",
                 JSONObject()
-                    .put("x", p("number", "横坐标，像素"))
-                    .put("y", p("number", "纵坐标，像素")),
+                    .put("x", p("number", "0~1 相对坐标（推荐）或绝对像素"))
+                    .put("y", p("number", "0~1 相对坐标（推荐）或绝对像素")),
                 listOf("x", "y"),
             )
+            fn("get_foreground_app", "查询当前前台应用包名。点击前应先确认目标应用在前台。", JSONObject(), emptyList())
             fn(
-                "swipe", "从一点滑动到另一点（需要已开始手机操控）。",
+                "swipe", "滑动。坐标规则同 tap：推荐 0~1 相对坐标，也可用绝对像素。",
                 JSONObject()
-                    .put("x1", p("number", "起点 x")).put("y1", p("number", "起点 y"))
-                    .put("x2", p("number", "终点 x")).put("y2", p("number", "终点 y"))
+                    .put("x1", p("number", "起点 x（0~1 或像素）")).put("y1", p("number", "起点 y"))
+                    .put("x2", p("number", "终点 x（0~1 或像素）")).put("y2", p("number", "终点 y"))
                     .put("duration", p("number", "滑动时长毫秒，默认 300")),
                 listOf("x1", "y1", "x2", "y2"),
             )
@@ -232,9 +234,24 @@ object AgentTools {
                             "· 连按两次音量上键可随时中止",
                     )
                     if (!allowed) "用户拒绝了 AI 操控手机"
-                    else if (PhoneControl.start(context)) "已开始操控手机，可调用 screen_snapshot 查看屏幕"
-                    else "启动操控失败"
+                    else if (PhoneControl.start(context)) {
+                        /*
+                         * 开始操控后把 Agent 自己退到桌面：
+                         * 否则 Agent 的界面盖在目标应用上面，AI 的点击会打进自己的界面。
+                         */
+                        AgentAccessibilityService.instance?.booleanGlobal(
+                            android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME,
+                        )
+                        val (w, h) = AgentAccessibilityService.instance?.screenSize() ?: (0 to 0)
+                        "已开始操控。屏幕 ${'$'}{w}x${'$'}{h}。已把 Agent 退到桌面；" +
+                            "请先 open_app 打开目标应用，用 get_foreground_app 确认前台后再 tap。" +
+                            "tap/swipe 推荐用 0~1 相对坐标（图片被接口缩放时绝对像素会偏）。"
+                    } else "启动操控失败"
                 }
+            }
+            "get_foreground_app" -> {
+                val pkg = AgentAccessibilityService.instance?.foregroundPackage()
+                if (pkg.isNullOrBlank()) "读不到前台应用（无障碍未连接或当前无窗口）" else "前台应用：$pkg"
             }
             "phone_control_stop" -> {
                 PhoneControl.stop(context)
@@ -249,9 +266,12 @@ object AgentTools {
                 else {
                     val svc = AgentAccessibilityService.instance
                     if (svc == null) "无障碍服务未连接"
-                    else if (svc.tap(args.optDouble("x", 0.0).toFloat(), args.optDouble("y", 0.0).toFloat())) {
-                        "已点击 (${args.optDouble("x", 0.0).toInt()}, ${args.optDouble("y", 0.0).toInt()})"
-                    } else "点击失败"
+                    else {
+                        val (sw, sh) = svc.screenSize()
+                        val (px, py) = toPx(args.optDouble("x", 0.0), args.optDouble("y", 0.0), sw, sh)
+                        if (svc.tap(px, py)) "已点击 ($px, $py)［相对 ${args.optDouble("x")}, ${args.optDouble("y")}］"
+                        else "点击失败"
+                    }
                 }
             }
             "swipe" -> {
@@ -260,12 +280,11 @@ object AgentTools {
                     val svc = AgentAccessibilityService.instance
                     if (svc == null) "无障碍服务未连接"
                     else {
-                        val ok = svc.swipe(
-                            args.optDouble("x1", 0.0).toFloat(), args.optDouble("y1", 0.0).toFloat(),
-                            args.optDouble("x2", 0.0).toFloat(), args.optDouble("y2", 0.0).toFloat(),
-                            args.optLong("duration", 300L),
-                        )
-                        if (ok) "已滑动" else "滑动失败"
+                        val (sw, sh) = svc.screenSize()
+                        val (x1, y1) = toPx(args.optDouble("x1", 0.0), args.optDouble("y1", 0.0), sw, sh)
+                        val (x2, y2) = toPx(args.optDouble("x2", 0.0), args.optDouble("y2", 0.0), sw, sh)
+                        val ok = svc.swipe(x1, y1, x2, y2, args.optLong("duration", 300L))
+                        if (ok) "已滑动 ($x1,$y1) → ($x2,$y2)" else "滑动失败"
                     }
                 }
             }
@@ -339,6 +358,18 @@ object AgentTools {
 
     /** shell 单引号转义：' -> '\'' */
     private fun shq(text: String): String = "'" + text.replace("'", "'\\''") + "'"
+
+    /**
+     * 坐标换算：<=1 视为相对坐标（按屏幕宽高折算），>1 视为绝对像素。
+     *
+     * 视觉模型拿到的图片常被接口缩放（1440x3200 的截图它可能只"看到" 900x2000），
+     * 按图目测的绝对值天生带比例误差；用 0~1 相对坐标就没有这个问题。
+     */
+    private fun toPx(x: Double, y: Double, screenW: Int, screenH: Int): Pair<Float, Float> {
+        val px = if (x <= 1.0) (x * screenW).toFloat() else x.toFloat()
+        val py = if (y <= 1.0) (y * screenH).toFloat() else y.toFloat()
+        return px.coerceIn(0f, screenW.toFloat()) to py.coerceIn(0f, screenH.toFloat())
+    }
 
     private suspend fun readFile(context: Context, config: AgentConfig, path: String): String {
         if (path.isBlank()) return "参数错误：缺少 path"

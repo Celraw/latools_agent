@@ -80,6 +80,16 @@ class AgentAccessibilityService : AccessibilityService() {
 
     fun booleanGlobal(action: Int): Boolean = performGlobalAction(action)
 
+    /** 当前前台应用包名（用于"点击前确认目标已在前台"）。 */
+    fun foregroundPackage(): String? =
+        runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull()
+
+    /** 屏幕真实像素尺寸，tap 坐标换算用。 */
+    fun screenSize(): Pair<Int, Int> {
+        val dm = resources.displayMetrics
+        return dm.widthPixels to dm.heightPixels
+    }
+
     /**
      * 截屏，保持**原始分辨率**。
      *
