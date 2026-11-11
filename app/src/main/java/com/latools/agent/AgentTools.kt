@@ -202,7 +202,7 @@ object AgentTools {
                     "已写入剪贴板（${text.length} 字符）"
                 }
             }
-            "open_app" -> openApp(context, args.optString("package"))
+            "open_app" -> openApp(context, config, args.optString("package"))
             "screenshot" -> screenshot(context, config)
             "read_file" -> readFile(context, config, args.optString("path"))
             "write_file" -> writeFile(
@@ -418,13 +418,28 @@ object AgentTools {
         return "$action $pkg\n${r.output}\n[通道=${r.channel}]"
     }
 
-    private fun openApp(context: Context, pkg: String): String {
+    private suspend fun openApp(context: Context, config: AgentConfig, pkg: String): String {
         if (pkg.isBlank()) return "参数错误：缺少 package"
+        /*
+         * 首选 PackageManager；拿不到 launch intent 时不要直接判定"没装" ——
+         * Android 11+ 的包可见性会让已安装应用也返回 null。
+         * 这里退回特权通道：先 resolve-activity 再 am start，两条命令都是 shell 标准做法。
+         */
         val intent = context.packageManager.getLaunchIntentForPackage(pkg)
-            ?: return "找不到可启动的应用：$pkg（可能未安装或没有启动界面）"
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        return runCatching { context.startActivity(intent); "已启动 $pkg" }
-            .getOrElse { "启动失败：${it.message ?: it.javaClass.simpleName}" }
+        if (intent != null) {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            runCatching { context.startActivity(intent); return "已启动 $pkg" }
+        }
+        val resolved = AgentShell.run(
+            context,
+            "cmd package resolve-activity --brief ${shq(pkg)} | tail -n 1",
+            config.channels, 10_000,
+        ).output.substringBeforeLast("\n[exit=").trim()
+        if (resolved.isBlank() || !resolved.contains('/')) {
+            return "找不到可启动的应用：$pkg（未安装，或没有可启动的 Activity）"
+        }
+        val start = AgentShell.run(context, "am start -n ${shq(resolved)}", config.channels, 10_000)
+        return if (start.ok) "已启动 $pkg（$resolved）" else "启动失败：${start.output.take(300)}"
     }
 
     private suspend fun screenSnapshot(): String {
@@ -434,14 +449,17 @@ object AgentTools {
         } ?: return "截图失败（系统拒绝或无显示）"
         val out = java.io.ByteArrayOutputStream()
         bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 70, out)
+        val w = bitmap.width
+        val h = bitmap.height
         bitmap.recycle()
         val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
         /*
-         * 注意：data URL 后面不能再拼任何人类可读文字。
-         * 之前拼了「（图片尺寸 WxH）」，服务端 base64 解码直接 400 Invalid base64 data。
-         * 尺寸信息对模型不是必需的，像素坐标它可以从图片本身推断。
+         * 第一行必须是纯 data URL（引擎按行拆分，第一行进图片消息）；
+         * 分辨率说明放在第二行，由引擎拼进工具结果文本给模型看。
+         * data URL 里混任何额外文字都会导致服务端 400 Invalid base64 data。
          */
-        return IMAGE_MARKER + "data:image/jpeg;base64," + b64
+        return IMAGE_MARKER + "data:image/jpeg;base64," + b64 +
+            "\n截图分辨率 ${'$'}{w}x${'$'}{h}。tap/swipe 的坐标请直接使用这个分辨率，不要按其它尺寸换算。"
     }
 
     private suspend fun screenshot(context: Context, config: AgentConfig): String {

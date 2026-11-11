@@ -546,8 +546,12 @@ class AgentEngine(
                 var output = withContext(Dispatchers.IO) { AgentTools.execute(context, config, call, ::deviceInfo, confirmDanger) }
                 // 图片类工具（screenshot）以标记返回，转成一条带图的用户消息，模型才"看得见"
                 if (output.startsWith(AgentTools.IMAGE_MARKER)) {
-                    pendingImages += output.removePrefix(AgentTools.IMAGE_MARKER)
-                    output = "已截图，图片见下一条消息。"
+                    // 第一行是 data URL，其余行是给模型的说明（如截图分辨率）
+                    val payload = output.removePrefix(AgentTools.IMAGE_MARKER)
+                    val firstLine = payload.lineSequence().first()
+                    val note = payload.lineSequence().drop(1).joinToString("\n").trim()
+                    pendingImages += firstLine
+                    output = if (note.isBlank()) "已截图，图片见下一条消息。" else "已截图。$note"
                 }
                 session.messages.add(ChatMsg("tool", output, toolCallId = call.id))
                 session.updatedAt = System.currentTimeMillis(); onUpdate()

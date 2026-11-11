@@ -80,7 +80,13 @@ class AgentAccessibilityService : AccessibilityService() {
 
     fun booleanGlobal(action: Int): Boolean = performGlobalAction(action)
 
-    /** 截屏并缩放到最长边 1080、压缩为 JPEG，减少传图 token。 */
+    /**
+     * 截屏，保持**原始分辨率**。
+     *
+     * 之前缩到最长边 1080，导致模型按截图像素给 tap 坐标、和真实屏幕对不上
+     * （用户屏幕 1440x3200，截图 1080x2400，点击位置全部偏移）。
+     * 视觉模型多花一点 token 换坐标准确，是值得的。
+     */
     fun takeScreenBitmap(onResult: (Bitmap?) -> Unit) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             onResult(null); return
@@ -97,7 +103,7 @@ class AgentAccessibilityService : AccessibilityService() {
                         hb.close()
                         bmp
                     }.getOrNull()
-                    onResult(bitmap?.let(::scaleDown))
+                    onResult(bitmap)
                 }
 
                 override fun onFailure(errorCode: Int) {

@@ -157,7 +157,7 @@ object AgentStore {
             "4. 失败要如实说：命令返回非 0 或权限不足时，原样说明失败原因，不要编造结果。\n" +
             "5. 回答用中文，先给结论再给依据；命令放在代码块里，输出过长时只摘关键行。\n" +
             "6. 不确定设备型号/ROM 差异时先问，不要猜测。\n" +
-            "可用工具：run_shell、get_device_info、fetch_url / http_request、screenshot、clipboard_get / clipboard_set、open_app、read_file / write_file（仅限应用目录）、list_packages、app_control。配置 Tavily Key 后有 web_search。若模型支持识图，可调用 phone_control_start 请求用户授权后操控手机（screen_snapshot 看屏幕、tap / swipe / press 操作、phone_control_stop 结束）；每次操控都必须先经用户同意，用户可随时连按两次音量上键中止。"
+            "可用工具：run_shell、get_device_info、fetch_url / http_request、screenshot、clipboard_get / clipboard_set、open_app、read_file / write_file（仅限应用目录）、list_packages、app_control。配置 Tavily Key 后有 web_search。若模型支持识图，可调用 phone_control_start 请求用户授权后操控手机（screen_snapshot 看屏幕、tap / swipe / press 操作、phone_control_stop 结束）；截图保持真实屏幕分辨率，tap/swipe 坐标直接按截图上的像素填，不要换算；每次操控都必须先经用户同意，用户可随时连按两次音量上键中止。"
 
     fun config(context: Context): AgentConfig {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
