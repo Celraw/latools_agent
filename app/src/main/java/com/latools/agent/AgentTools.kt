@@ -83,7 +83,7 @@ object AgentTools {
             JSONObject().put("text", p("string", "要复制的文本")), listOf("text"),
         )
         fn(
-            "open_app", "按包名启动一个已安装的应用（拉起其主界面）。",
+            "open_app", "按包名启动一个已安装的应用（拉起其主界面）。需要操控时请先 phone_control_start 取得授权再调用本工具。",
             JSONObject().put("package", p("string", "应用包名，例如 com.tencent.mm")), listOf("package"),
         )
         fn(
@@ -119,7 +119,7 @@ object AgentTools {
         if (includeControl) {
             fn(
                 "phone_control_start",
-                "请求用户授权后开始操控手机：屏幕四周会出现霓虹边框。之后可用 screen_snapshot / tap / swipe / press。",
+                "请求用户授权后开始操控手机：屏幕四周会出现霓虹边框，Agent 会退到桌面。必须在 open_app 之前调用——否则目标应用已在前台，用户得切回来才能授权。",
                 JSONObject(), emptyList(),
             )
             fn("phone_control_stop", "结束手机操控并关闭霓虹边框。", JSONObject(), emptyList())
