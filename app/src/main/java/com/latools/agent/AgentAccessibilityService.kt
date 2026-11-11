@@ -27,7 +27,19 @@ class AgentAccessibilityService : AccessibilityService() {
         PhoneControl.onServiceReady(this)
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    /** 每次窗口/内容变化 +1，用于"点击后有没有生效"的验证。 */
+    @Volatile
+    var eventSeq: Long = 0L
+        private set
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        when (event?.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED,
+            -> eventSeq += 1
+        }
+    }
 
     override fun onInterrupt() = Unit
 
@@ -83,6 +95,98 @@ class AgentAccessibilityService : AccessibilityService() {
     /** 当前前台应用包名（用于"点击前确认目标已在前台"）。 */
     fun foregroundPackage(): String? =
         runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull()
+
+    /** 一次 ui_dump 的节点快照：文本 + 屏幕坐标 bounds。 */
+    data class UiNode(
+        val label: String,
+        val className: String,
+        val clickable: Boolean,
+        val left: Int,
+        val top: Int,
+        val right: Int,
+        val bottom: Int,
+    ) {
+        val centerX: Float get() = (left + right) / 2f
+        val centerY: Float get() = (top + bottom) / 2f
+    }
+
+    @Volatile
+    private var lastNodes: List<UiNode> = emptyList()
+
+    /**
+     * 遍历当前窗口的节点树，返回精简文本 + 缓存节点快照。
+     *
+     * 这是手机操控最可靠的一环：节点自带 bounds（屏幕坐标）和文本，
+     * 不需要模型看图估坐标，误触率会明显下降；canvas 类界面节点为空时才退回截图。
+     */
+    fun dumpNodes(maxNodes: Int = 80): Pair<String, List<UiNode>> {
+        val root = rootInActiveWindow ?: return "当前没有可用窗口（节点树为空）" to emptyList()
+        val nodes = mutableListOf<UiNode>()
+        val sb = StringBuilder()
+        var index = 0
+        try {
+            val queue = ArrayDeque<Pair<android.view.accessibility.AccessibilityNodeInfo, Int>>()
+            queue.add(root to 0)
+            while (queue.isNotEmpty() && nodes.size < maxNodes) {
+                val (node, depth) = queue.removeFirst()
+                if (depth > 14) continue
+                val text = node.text?.toString()?.trim()
+                val desc = node.contentDescription?.toString()?.trim()
+                val label = (text?.takeIf { it.isNotEmpty() } ?: desc?.takeIf { it.isNotEmpty() }).orEmpty()
+                val cls = node.className?.toString()?.substringAfterLast('.') ?: "-"
+                val clickable = node.isClickable || node.isCheckable || node.isEditable
+                val rect = android.graphics.Rect()
+                node.getBoundsInScreen(rect)
+                if (node.isVisibleToUser && (label.isNotEmpty() || clickable) && rect.width() > 0) {
+                    val shown = label.take(48)
+                    nodes += UiNode(shown, cls, clickable, rect.left, rect.top, rect.right, rect.bottom)
+                    sb.append('[').append(index).append("] ")
+                        .append(cls)
+                        .append(if (clickable) " 可点" else "")
+                        .append(" \"").append(shown).append("\"")
+                        .append(" bounds=(").append(rect.left).append(',').append(rect.top)
+                        .append(")-(").append(rect.right).append(',').append(rect.bottom).append(")\n")
+                    index++
+                }
+                for (i in 0 until node.childCount) {
+                    node.getChild(i)?.let { queue.add(it to depth + 1) }
+                }
+            }
+        } catch (_: Exception) {
+            // 部分 ROM 在遍历中途会抛异常，已收集到的部分照常返回
+        }
+        lastNodes = nodes
+        if (nodes.isEmpty()) return "节点树为空（可能是游戏/canvas 界面）" to emptyList()
+        return sb.toString() to nodes
+    }
+
+    fun nodeCount(): Int = lastNodes.size
+
+    /** 按索引点击上次 dump 的节点：先试 ACTION_CLICK，失败再用坐标手势。 */
+    fun tapNode(index: Int, nodes: List<UiNode>): String {
+        val node = nodes.getOrNull(index) ?: return "节点索引越界（共 ${nodes.size} 个）"
+        val path = Path().apply { moveTo(node.centerX, node.centerY) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
+            .build()
+        val ok = dispatchGesture(gesture, null, null)
+        if (ok) PhoneControl.showTap(node.centerX, node.centerY)
+        return if (ok) {
+            "已点击 [$index] \"${node.label}\" @(${node.centerX.toInt()}, ${node.centerY.toInt()})"
+        } else {
+            "点击失败：无障碍拒绝执行手势"
+        }
+    }
+
+    /** 等界面安静下来（无事件）或超时，返回是否观察到变化。 */
+    fun awaitUiChange(before: Long, timeoutMs: Long = 600): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (eventSeq != before) return true
+            Thread.sleep(30)
+        }
+        return false
+    }
 
     /** 屏幕真实像素尺寸，tap 坐标换算用。 */
     fun screenSize(): Pair<Int, Int> {

@@ -134,6 +134,21 @@ object AgentTools {
             )
             fn("get_foreground_app", "查询当前前台应用包名。点击前应先确认目标应用在前台。", JSONObject(), emptyList())
             fn(
+                "ui_dump",
+                "读取当前界面的无障碍节点树：每行一个元素，含序号、类型、文本、可点标记与屏幕坐标。优先用它定位目标，比截图目测准确得多。",
+                JSONObject(), emptyList(),
+            )
+            fn(
+                "tap_node",
+                "点击 ui_dump 结果里指定序号的元素（推荐：坐标由系统给出，不会点偏）。",
+                JSONObject().put("index", p("number", "ui_dump 输出里的序号")), listOf("index"),
+            )
+            fn(
+                "tap_text",
+                "按文本查找元素并点击（支持包含匹配，如「发送」「搜索」）。ui_dump 找不到时再用。",
+                JSONObject().put("text", p("string", "要点击的文本片段")), listOf("text"),
+            )
+            fn(
                 "swipe", "滑动。坐标规则同 tap：推荐 0~1 相对坐标，也可用绝对像素。",
                 JSONObject()
                     .put("x1", p("number", "起点 x（0~1 或像素）")).put("y1", p("number", "起点 y"))
@@ -261,16 +276,74 @@ object AgentTools {
                 if (!PhoneControl.isActive) "尚未开始手机操控，请先调用 phone_control_start"
                 else screenSnapshot()
             }
+            "ui_dump" -> {
+                val svc = AgentAccessibilityService.instance
+                if (svc == null) "无障碍服务未连接"
+                else {
+                    val (text, nodes) = svc.dumpNodes()
+                    if (nodes.isEmpty()) text
+                    else "前台：${svc.foregroundPackage() ?: "未知"}，共 ${nodes.size} 个可交互元素：\n$text"
+                }
+            }
+            "tap_node" -> {
+                if (!PhoneControl.isActive) "尚未开始手机操控"
+                else {
+                    val svc = AgentAccessibilityService.instance
+                    if (svc == null) "无障碍服务未连接"
+                    else {
+                        val (_, nodes) = svc.dumpNodes()
+                        val index = args.optInt("index", -1)
+                        svc.tapNode(index, nodes)
+                    }
+                }
+            }
+            "tap_text" -> {
+                if (!PhoneControl.isActive) "尚未开始手机操控"
+                else {
+                    val svc = AgentAccessibilityService.instance
+                    if (svc == null) "无障碍服务未连接"
+                    else {
+                        val needle = args.optString("text").trim()
+                        if (needle.isBlank()) "参数错误：缺少 text"
+                        else {
+                            val (_, nodes) = svc.dumpNodes()
+                            val hit = nodes.indexOfFirst { it.label.contains(needle, ignoreCase = true) }
+                            if (hit < 0) {
+                                "没有找到文本包含「$needle」的元素。可用 ui_dump 查看当前界面，或用 tap 按相对坐标点击。"
+                            } else {
+                                val result = svc.tapNode(hit, nodes)
+                                val before = svc.eventSeq
+                                val changed = svc.awaitUiChange(before, 700)
+                                result + if (changed) "\n界面已变化" else "\n界面无明显变化（可能已被触发但无跳转）"
+                            }
+                        }
+                    }
+                }
+            }
             "tap" -> {
                 if (!PhoneControl.isActive) "尚未开始手机操控"
                 else {
                     val svc = AgentAccessibilityService.instance
                     if (svc == null) "无障碍服务未连接"
                     else {
+                        /*
+                         * 点击前做两件事：
+                         *  1) 前台校验：如果此刻前台是 Agent 自己，说明界面盖住了目标，直接拒绝；
+                         *  2) 记录事件序号，点击后等 600ms 看界面有没有变化 —— 没变化就明确告诉模型
+                         *     "可能没点中"，避免它继续在错误的界面上往下操作。
+                         */
+                        val fg = svc.foregroundPackage()
+                        if (fg == context.packageName) {
+                            return@execute "当前前台是 Agent 自己，无法点击目标应用。请先 open_app 再试"
+                        }
                         val (sw, sh) = svc.screenSize()
                         val (px, py) = toPx(args.optDouble("x", 0.0), args.optDouble("y", 0.0), sw, sh)
-                        if (svc.tap(px, py)) "已点击 ($px, $py)［相对 ${args.optDouble("x")}, ${args.optDouble("y")}］"
-                        else "点击失败"
+                        val before = svc.eventSeq
+                        if (!svc.tap(px, py)) return@execute "点击失败：无障碍拒绝执行手势"
+                        val changed = svc.awaitUiChange(before, 700)
+                        val where = "前台 ${fg ?: "未知"}，点击 ($px, $py)"
+                        if (changed) "已点击（$where），界面已变化"
+                        else "已点击（$where），但界面无变化：可能没点中、被遮挡，或该元素需要长按"
                     }
                 }
             }
