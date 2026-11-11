@@ -222,8 +222,13 @@ private fun AgentApp() {
                 busy = false
                 version++
                 job = null
-                // 手机操控还在进行时不能停保活，交给 PhoneControl 结束时收尾
-                if (!PhoneControl.isActive) AgentGuardService.stop(context)
+                /*
+                 * 一轮对话结束就收掉操控会话：
+                 * 霓虹边框如果一直亮着，用户会以为 AI 还在操作，实际它已经停了。
+                 * 需要继续操控时，模型下一轮必须重新调用 phone_control_start 并经用户确认。
+                 */
+                if (PhoneControl.isActive) PhoneControl.stop(context)
+                AgentGuardService.stop(context)
             }
         }
     }
@@ -374,7 +379,8 @@ private fun AgentApp() {
                     job = null
                     busy = false
                     version++
-                    if (!PhoneControl.isActive) AgentGuardService.stop(context)
+                    if (PhoneControl.isActive) PhoneControl.stop(context)
+                    AgentGuardService.stop(context)
                 },
             )
         }

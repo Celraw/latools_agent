@@ -168,7 +168,22 @@ object AgentStore {
             temperature = p.getFloat("temperature", 0.3f).toDouble(),
             reasoningEffort = p.getString("reasoning_effort", "none").orEmpty(),
             contextLimitChars = p.getInt("context_limit", 24_000),
-            maxToolRounds = p.getInt("max_tool_rounds", 50),
+            /*
+             * 迁移：旧版本默认值就是 8，并且被写进过 prefs，导致升级后仍然是 8。
+             * 只迁移一次（用 migrated_rounds_v2 标记），之后用户自己改的值不再覆盖。
+             */
+            maxToolRounds = run {
+                val stored = p.getInt("max_tool_rounds", 50)
+                if (!p.getBoolean("migrated_rounds_v2", false) && stored <= 8) {
+                    p.edit().putInt("max_tool_rounds", 50).putBoolean("migrated_rounds_v2", true).apply()
+                    50
+                } else {
+                    if (!p.getBoolean("migrated_rounds_v2", false)) {
+                        p.edit().putBoolean("migrated_rounds_v2", true).apply()
+                    }
+                    stored
+                }
+            },
             systemPrompt = p.getString("system_prompt", DEFAULT_SYSTEM_PROMPT)
                 ?.takeIf { it.isNotBlank() } ?: DEFAULT_SYSTEM_PROMPT,
             channels = p.getStringSet("channels", setOf(AgentChannel.ROOT.id, AgentChannel.SHIZUKU.id, AgentChannel.DHIZUKU.id))
