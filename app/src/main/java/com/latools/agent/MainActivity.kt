@@ -446,9 +446,9 @@ private fun AgentApp() {
                     dangerDeferred?.complete(false); dangerDeferred = null; dangerCommand = null
                 },
             ) {
-                T("确认执行危险命令？", 16.sp, TextMain, FontWeight.Bold)
+                T("需要你确认", 16.sp, TextMain, FontWeight.Bold)
                 Spacer(Modifier.height(10.dp))
-                T("以下命令可能修改系统或删除数据，请确认它确实是你想要的。", 12.sp, TextSub)
+                T("AI 请求执行下面的操作，请确认后才会继续。", 12.sp, TextSub)
                 Spacer(Modifier.height(8.dp))
                 Box(Modifier.fillMaxWidth().background(Surface2, RoundedCornerShape(10.dp)).padding(12.dp)) {
                     T(cmd, 12.sp, TextMain, mono = true)
@@ -1128,6 +1128,10 @@ private fun SettingsPanel(
     var channels by remember { mutableStateOf(config.channels) }
     var streamOut by remember { mutableStateOf(config.stream) }
     var tavilyKey by remember { mutableStateOf(config.tavilyKey) }
+    var visionEnabled by remember { mutableStateOf(config.visionEnabled) }
+    // 无障碍服务连接状态：每次进入设置页刷新一次
+    var accessibilityOn by remember { mutableStateOf(AgentAccessibilityService.isConnected()) }
+    LaunchedEffect(Unit) { accessibilityOn = AgentAccessibilityService.isConnected() }
 
     PageScaffold(title = "Agent 设置", onBack = onDismiss) {
         Column(
@@ -1185,6 +1189,50 @@ private fun SettingsPanel(
                 T("执行时按 ROOT → Shizuku → Dhizuku 顺序尝试，命中第一个可用通道。", 11.sp, TextFaint)
             }
 
+            SectionLabel("手机操控")
+            WhiteCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        T("模型支持识图", 13.sp, TextMain, FontWeight.SemiBold)
+                        Spacer(Modifier.height(2.dp))
+                        T("关闭后不向模型开放截屏/点击/滑动工具", 11.sp, TextFaint)
+                    }
+                    Box(
+                        Modifier.size(46.dp, 28.dp).clip(RoundedCornerShape(999.dp))
+                            .background(if (visionEnabled) Primary else SurfaceHi)
+                            .clickable { visionEnabled = !visionEnabled },
+                        contentAlignment = if (visionEnabled) Alignment.CenterEnd else Alignment.CenterStart,
+                    ) {
+                        Box(Modifier.padding(horizontal = 3.dp).size(22.dp).background(Surface, CircleShape))
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        T("无障碍服务", 13.sp, TextMain, FontWeight.SemiBold)
+                        Spacer(Modifier.height(2.dp))
+                        T(
+                            if (accessibilityOn) "已连接，AI 可截屏与模拟点击" else "未连接，手机操控不可用",
+                            11.sp, if (accessibilityOn) Ok else Danger,
+                        )
+                    }
+                    Box(
+                        Modifier.clip(RoundedCornerShape(10.dp)).background(Surface2)
+                            .clickable {
+                                val intent = android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                runCatching { context.startActivity(intent) }
+                            }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    ) { T(if (accessibilityOn) "查看" else "去开启", 12.sp, Primary) }
+                }
+                Spacer(Modifier.height(10.dp))
+                T(
+                    "操控期间屏幕四周会出现霓虹边框。连按两次音量上键可立即停止；AI 也可以调用 phone_control_stop 主动结束。",
+                    11.sp, TextFaint,
+                )
+            }
+
             SectionLabel("联网搜索")
             WhiteCard {
                 Field("Tavily API Key", tavilyKey, { tavilyKey = it }, secret = true)
@@ -1219,6 +1267,7 @@ private fun SettingsPanel(
                         channels = channels,
                         stream = streamOut,
                         tavilyKey = tavilyKey,
+                        visionEnabled = visionEnabled,
                     ),
                 )
             }

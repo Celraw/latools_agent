@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    AI 手机操控的无障碍服务配置。
+
+    · canPerformGestures：点击/滑动靠 dispatchGesture，必须开
+    · canTakeScreenshot：让 AI「看见」屏幕，不需要 MediaProjection 弹窗
+    · canRetrieveWindowContent：读取当前窗口信息，用于判断有没有切换成功
+    · 事件类型只订阅窗口变化，避免每帧都回调（耗电）
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
+    android:description="@string/accessibility_desc"
+    android:notificationTimeout="150"
+    android:settingsActivity="com.latools.agent.MainActivity" />

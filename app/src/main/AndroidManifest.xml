@@ -7,7 +7,7 @@
     <application
         android:enableOnBackInvokedCallback="true"
         android:allowBackup="false"
-        android:label="LA Agent"
+        android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity
@@ -28,5 +28,19 @@
             android:exported="true"
             android:multiprocess="false" />
 
+
+        <!-- AI 手机操控：截图 + 手势 + 音量键急停 -->
+        <service
+            android:name=".AgentAccessibilityService"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/agent_accessibility" />
+        </service>
     </application>
 </manifest>

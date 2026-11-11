@@ -156,7 +156,8 @@ data class AssistantReply(val content: String?, val reasoning: String?, val call
  */
 object AgentApi {
 
-    private fun toolsJson(includeSearch: Boolean): String = AgentTools.toolsJson(includeSearch)
+    private fun toolsJson(includeSearch: Boolean, includeControl: Boolean): String =
+        AgentTools.toolsJson(includeSearch, includeControl)
 
     /**
      * 直接抓取一个 URL 的正文。
@@ -259,7 +260,7 @@ object AgentApi {
         val body = JSONObject().apply {
             put("model", config.model)
             put("messages", buildMessages(messages))
-            put("tools", JSONArray(toolsJson(config.tavilyKey.isNotBlank())))
+            put("tools", JSONArray(toolsJson(config.tavilyKey.isNotBlank(), config.visionEnabled)))
             put("tool_choice", "auto")
             put("temperature", config.temperature)
             put("stream", false)
@@ -285,7 +286,7 @@ object AgentApi {
         val body = JSONObject().apply {
             put("model", config.model)
             put("messages", buildMessages(messages))
-            put("tools", JSONArray(toolsJson(config.tavilyKey.isNotBlank())))
+            put("tools", JSONArray(toolsJson(config.tavilyKey.isNotBlank(), config.visionEnabled)))
             put("tool_choice", "auto")
             put("temperature", config.temperature)
             put("stream", true)

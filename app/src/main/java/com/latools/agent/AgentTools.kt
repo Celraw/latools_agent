@@ -42,7 +42,7 @@ object AgentTools {
     fun isDangerous(command: String): Boolean = DANGEROUS.any { it.containsMatchIn(command) }
 
     /** 生成给接口的 tools 数组。 */
-    fun toolsJson(includeSearch: Boolean): String = JSONArray().apply {
+    fun toolsJson(includeSearch: Boolean, includeControl: Boolean): String = JSONArray().apply {
         fun fn(name: String, description: String, props: JSONObject, required: List<String>) {
             put(JSONObject().apply {
                 put("type", "function")
@@ -116,6 +116,34 @@ object AgentTools {
                 .put("action", p("string", "force-stop / disable / enable / clear / suspend / unsuspend")),
             listOf("package", "action"),
         )
+        if (includeControl) {
+            fn(
+                "phone_control_start",
+                "请求用户授权后开始操控手机：屏幕四周会出现霓虹边框。之后可用 screen_snapshot / tap / swipe / press。",
+                JSONObject(), emptyList(),
+            )
+            fn("phone_control_stop", "结束手机操控并关闭霓虹边框。", JSONObject(), emptyList())
+            fn("screen_snapshot", "截取当前屏幕作为图片查看（需要已开始手机操控）。", JSONObject(), emptyList())
+            fn(
+                "tap", "在屏幕坐标处点击（需要已开始手机操控）。坐标基于截图像素。",
+                JSONObject()
+                    .put("x", p("number", "横坐标，像素"))
+                    .put("y", p("number", "纵坐标，像素")),
+                listOf("x", "y"),
+            )
+            fn(
+                "swipe", "从一点滑动到另一点（需要已开始手机操控）。",
+                JSONObject()
+                    .put("x1", p("number", "起点 x")).put("y1", p("number", "起点 y"))
+                    .put("x2", p("number", "终点 x")).put("y2", p("number", "终点 y"))
+                    .put("duration", p("number", "滑动时长毫秒，默认 300")),
+                listOf("x1", "y1", "x2", "y2"),
+            )
+            fn(
+                "press", "按系统导航键：back / home / recents。",
+                JSONObject().put("key", p("string", "back / home / recents")), listOf("key"),
+            )
+        }
         if (includeSearch) {
             fn(
                 "web_search", "联网搜索最新信息（Tavily）。",
@@ -189,6 +217,75 @@ object AgentTools {
                 args.optString("filter"),
                 args.optBoolean("include_system", false),
             )
+            "phone_control_start" -> {
+                if (!config.visionEnabled) {
+                    "当前模型设置为不支持识图，手机操控工具已关闭（设置 → 手机操控）"
+                } else if (!PhoneControl.canControl()) {
+                    "无障碍服务未连接：请先在 设置 → 手机操控 里开启无障碍服务"
+                } else if (PhoneControl.isActive) {
+                    "已经在操控中"
+                } else {
+                    val allowed = confirmDanger(
+                        "AI 请求操控这台手机：\n" +
+                            "· 会读取屏幕截图并模拟点击/滑动\n" +
+                            "· 屏幕四周会亮起霓虹边框表示正在操控\n" +
+                            "· 连按两次音量上键可随时中止",
+                    )
+                    if (!allowed) "用户拒绝了 AI 操控手机"
+                    else if (PhoneControl.start(context)) "已开始操控手机，可调用 screen_snapshot 查看屏幕"
+                    else "启动操控失败"
+                }
+            }
+            "phone_control_stop" -> {
+                PhoneControl.stop(context)
+                "已结束手机操控"
+            }
+            "screen_snapshot" -> {
+                if (!PhoneControl.isActive) "尚未开始手机操控，请先调用 phone_control_start"
+                else screenSnapshot()
+            }
+            "tap" -> {
+                if (!PhoneControl.isActive) "尚未开始手机操控"
+                else {
+                    val svc = AgentAccessibilityService.instance
+                    if (svc == null) "无障碍服务未连接"
+                    else if (svc.tap(args.optDouble("x", 0.0).toFloat(), args.optDouble("y", 0.0).toFloat())) {
+                        "已点击 (${args.optDouble("x", 0.0).toInt()}, ${args.optDouble("y", 0.0).toInt()})"
+                    } else "点击失败"
+                }
+            }
+            "swipe" -> {
+                if (!PhoneControl.isActive) "尚未开始手机操控"
+                else {
+                    val svc = AgentAccessibilityService.instance
+                    if (svc == null) "无障碍服务未连接"
+                    else {
+                        val ok = svc.swipe(
+                            args.optDouble("x1", 0.0).toFloat(), args.optDouble("y1", 0.0).toFloat(),
+                            args.optDouble("x2", 0.0).toFloat(), args.optDouble("y2", 0.0).toFloat(),
+                            args.optLong("duration", 300L),
+                        )
+                        if (ok) "已滑动" else "滑动失败"
+                    }
+                }
+            }
+            "press" -> {
+                if (!PhoneControl.isActive) "尚未开始手机操控"
+                else {
+                    val svc = AgentAccessibilityService.instance
+                    if (svc == null) "无障碍服务未连接"
+                    else {
+                        val action = when (args.optString("key").lowercase()) {
+                            "back" -> android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK
+                            "home" -> android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME
+                            "recents" -> android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS
+                            else -> -1
+                        }
+                        if (action == -1) "未知按键：${args.optString("key")}"
+                        else if (svc.booleanGlobal(action)) "已按下 ${args.optString("key")}" else "按键失败"
+                    }
+                }
+            }
             "app_control" -> appControl(
                 context,
                 config,
@@ -328,6 +425,20 @@ object AgentTools {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         return runCatching { context.startActivity(intent); "已启动 $pkg" }
             .getOrElse { "启动失败：${it.message ?: it.javaClass.simpleName}" }
+    }
+
+    private suspend fun screenSnapshot(): String {
+        val svc = AgentAccessibilityService.instance ?: return "无障碍服务未连接"
+        val bitmap = kotlinx.coroutines.suspendCancellableCoroutine<android.graphics.Bitmap?> { cont ->
+            svc.takeScreenBitmap { bmp -> cont.resumeWith(Result.success(bmp)) }
+        } ?: return "截图失败（系统拒绝或无显示）"
+        val out = java.io.ByteArrayOutputStream()
+        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 70, out)
+        val w = bitmap.width
+        val h = bitmap.height
+        bitmap.recycle()
+        val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        return IMAGE_MARKER + "data:image/jpeg;base64," + b64 + "\n（图片尺寸 ${'$'}w x ${'$'}h）"
     }
 
     private suspend fun screenshot(context: Context, config: AgentConfig): String {
