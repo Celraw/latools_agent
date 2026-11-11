@@ -63,7 +63,9 @@ class AgentAccessibilityService : AccessibilityService() {
         val path = Path().apply { moveTo(x, y) }
         val stroke = GestureDescription.StrokeDescription(path, 0, 60)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return dispatchGesture(gesture, null, null)
+        val dispatched = dispatchGesture(gesture, null, null)
+        if (dispatched) PhoneControl.showTap(this, x, y)
+        return dispatched
     }
 
     fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long): Boolean {

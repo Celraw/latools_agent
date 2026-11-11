@@ -168,7 +168,7 @@ object AgentStore {
             temperature = p.getFloat("temperature", 0.3f).toDouble(),
             reasoningEffort = p.getString("reasoning_effort", "none").orEmpty(),
             contextLimitChars = p.getInt("context_limit", 24_000),
-            maxToolRounds = p.getInt("max_tool_rounds", 8),
+            maxToolRounds = p.getInt("max_tool_rounds", 50),
             systemPrompt = p.getString("system_prompt", DEFAULT_SYSTEM_PROMPT)
                 ?.takeIf { it.isNotBlank() } ?: DEFAULT_SYSTEM_PROMPT,
             channels = p.getStringSet("channels", setOf(AgentChannel.ROOT.id, AgentChannel.SHIZUKU.id, AgentChannel.DHIZUKU.id))

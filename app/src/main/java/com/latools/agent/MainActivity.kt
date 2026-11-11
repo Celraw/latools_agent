@@ -96,6 +96,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -147,6 +148,7 @@ private fun AgentApp() {
     var version by remember { mutableStateOf(0) }
     var channels by remember { mutableStateOf<List<AgentChannel>>(emptyList()) }
     var messageAction by remember { mutableStateOf<Pair<ChatMsg, Int>?>(null) }
+    var job by remember { mutableStateOf<Job?>(null) }
     /*
      * 返回键只做「先关页面、再退出」；预测性返回的动画交给 AOSP 默认实现
      * （Manifest 里 enableOnBackInvokedCallback=true，系统会在滑动时给 Activity
@@ -192,7 +194,7 @@ private fun AgentApp() {
         session.messages.add(ChatMsg("user", body, images = images))
         session.updatedAt = System.currentTimeMillis()
         version++
-        scope.launch {
+        job = scope.launch {
             val engine = AgentEngine(
                 context = context,
                 config = config,
@@ -204,10 +206,14 @@ private fun AgentApp() {
                 },
                 onUpdate = { version++ },
             )
-            engine.send(session, body, images, userMessageAlreadyAdded = true)
-            AgentStore.save(context, session)
-            busy = false
-            version++
+            try {
+                engine.send(session, body, images, userMessageAlreadyAdded = true)
+            } finally {
+                AgentStore.save(context, session)
+                busy = false
+                version++
+                job = null
+            }
         }
     }
 
@@ -352,6 +358,12 @@ private fun AgentApp() {
                 busy = busy,
                 onPickFile = { picker.launch(arrayOf("*/*")) },
                 onSend = ::send,
+                onStop = {
+                    job?.cancel()
+                    job = null
+                    busy = false
+                    version++
+                },
             )
         }
 
@@ -949,6 +961,7 @@ private fun Composer(
     busy: Boolean,
     onPickFile: () -> Unit,
     onSend: () -> Unit,
+    onStop: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
         if (attachments.isNotEmpty()) {
@@ -991,16 +1004,28 @@ private fun Composer(
                 },
             )
             Box(
-                Modifier.size(40.dp).clip(CircleShape).background(Primary).clickable(enabled = !busy, onClick = onSend),
+                Modifier.size(40.dp).clip(CircleShape)
+                    .background(if (busy) Danger else Primary)
+                    .clickable(onClick = if (busy) onStop else onSend),
                 contentAlignment = Alignment.Center,
             ) {
                 Canvas(Modifier.size(18.dp)) {
-                    val w = size.width; val h = size.height
-                    val path = Path().apply {
-                        moveTo(w * 0.06f, h * 0.5f); lineTo(w * 0.92f, h * 0.5f)
-                        moveTo(w * 0.54f, h * 0.12f); lineTo(w * 0.92f, h * 0.5f); lineTo(w * 0.54f, h * 0.88f)
+                    if (busy) {
+                        // 停止：实心方块
+                        drawRoundRect(
+                            Color.White,
+                            topLeft = Offset(size.width * 0.22f, size.height * 0.22f),
+                            size = androidx.compose.ui.geometry.Size(size.width * 0.56f, size.height * 0.56f),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()),
+                        )
+                    } else {
+                        val w = size.width; val h = size.height
+                        val path = Path().apply {
+                            moveTo(w * 0.06f, h * 0.5f); lineTo(w * 0.92f, h * 0.5f)
+                            moveTo(w * 0.54f, h * 0.12f); lineTo(w * 0.92f, h * 0.5f); lineTo(w * 0.54f, h * 0.88f)
+                        }
+                        drawPath(path, Color.White, style = Stroke(2.2.dp.toPx(), cap = StrokeCap.Round))
                     }
-                    drawPath(path, Color.White, style = Stroke(2.2.dp.toPx(), cap = StrokeCap.Round))
                 }
             }
         }
@@ -1129,6 +1154,7 @@ private fun SettingsPanel(
     var streamOut by remember { mutableStateOf(config.stream) }
     var tavilyKey by remember { mutableStateOf(config.tavilyKey) }
     var visionEnabled by remember { mutableStateOf(config.visionEnabled) }
+    var maxRounds by remember { mutableStateOf(config.maxToolRounds.toString()) }
     val context = LocalContext.current
     // 无障碍服务连接状态：每次进入设置页刷新一次
     var accessibilityOn by remember { mutableStateOf(AgentAccessibilityService.isConnected()) }
@@ -1167,6 +1193,10 @@ private fun SettingsPanel(
                 Field("上下文压缩阈值（字符）", limit, { limit = it })
                 Spacer(Modifier.height(8.dp))
                 T("超过后自动把较早的消息压缩成摘要，避免超长被接口拒绝。", 11.sp, TextFaint)
+                Spacer(Modifier.height(12.dp))
+                Field("单轮工具调用上限", maxRounds, { maxRounds = it.filter { c -> c.isDigit() }.take(3) })
+                Spacer(Modifier.height(8.dp))
+                T("一次提问里模型最多连续调用多少次工具，默认 50；复杂任务可调到 100。", 11.sp, TextFaint)
             }
 
             SectionLabel("特权通道")
@@ -1269,6 +1299,7 @@ private fun SettingsPanel(
                         stream = streamOut,
                         tavilyKey = tavilyKey,
                         visionEnabled = visionEnabled,
+                        maxToolRounds = maxRounds.toIntOrNull()?.coerceIn(1, 100) ?: 50,
                     ),
                 )
             }

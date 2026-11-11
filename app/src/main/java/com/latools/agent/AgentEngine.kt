@@ -509,6 +509,11 @@ class AgentEngine(
                 } else {
                     withContext(Dispatchers.IO) { AgentApi.chat(config, messages) }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 用户主动停止：把占位气泡去掉，不要留下半截内容
+                session.messages.removeAt(placeholderIndex)
+                session.updatedAt = System.currentTimeMillis(); onUpdate()
+                throw e
             } catch (e: Exception) {
                 session.messages[placeholderIndex] = ChatMsg("assistant", "请求失败：${e.message ?: e.javaClass.simpleName}")
                 session.updatedAt = System.currentTimeMillis(); onUpdate()
