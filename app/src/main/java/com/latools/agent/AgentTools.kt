@@ -353,6 +353,9 @@ object AgentTools {
                         if (text.isBlank() && !args.has("text")) "参数错误：缺少 text"
                         else {
                             val failure = svc.setFocusedText(text)
+                            if (failure == AgentAccessibilityService.UNVERIFIED) {
+                                return@execute "已提交写入（${text.length} 字符），但该应用不暴露输入框内容，无法校验；请截图确认是否真的进去了"
+                            }
                             if (failure != null && svc.inputCandidateCenters().isEmpty()) {
                                 // 节点树完全不可用（例如无障碍 flag 缺失/应用不暴露结构）：
                                 // 光标已聚焦时 KEYCODE_PASTE 通常仍能生效，直接按"已粘贴"处理并说明无法校验

@@ -378,7 +378,48 @@ object AgentApi {
         return parse(post(config, body)).content?.takeIf { it.isNotBlank() } ?: "（摘要生成失败）"
     }
 
-    private fun buildMessages(messages: List<ChatMsg>): JSONArray = JSONArray().apply {
+    /**
+     * 历史消毒：保证 tool 消息一定紧跟带 tool_calls 的 assistant，且每条 tool_call 都有对应响应。
+     *
+     * 孤立 tool 的来源不止取消：分支会话、压缩、手动删改都可能留下。
+     * 与其在每个入口修，不如发请求前统一过一遍 —— 任何脏历史都不会再触发
+     * 400: Messages with role 'tool' must be a response to a preceding message with 'tool_calls'。
+     */
+    private fun sanitize(messages: List<ChatMsg>): List<ChatMsg> {
+        val out = mutableListOf<ChatMsg>()
+        var i = 0
+        while (i < messages.size) {
+            val m = messages[i]
+            if (m.role == "tool") { i++; continue }
+            val calls = m.toolCalls
+            if (m.role == "assistant" && !calls.isNullOrEmpty()) {
+                val ids = calls.map { it.id }.toSet()
+                val answers = mutableListOf<ChatMsg>()
+                var j = i + 1
+                while (j < messages.size && messages[j].role == "tool") {
+                    val t = messages[j]
+                    if (t.toolCallId in ids) answers += t
+                    j++
+                }
+                val answeredIds = answers.mapNotNull { it.toolCallId }.toSet()
+                val keptCalls = calls.filter { it.id in answeredIds }
+                if (keptCalls.isEmpty()) {
+                    if (!m.content.isNullOrBlank()) out += m.copy(toolCalls = null)
+                } else {
+                    out += m.copy(toolCalls = keptCalls)
+                    out += answers
+                }
+                i = j
+            } else {
+                out += m
+                i++
+            }
+        }
+        return out
+    }
+
+    private fun buildMessages(rawMessages: List<ChatMsg>): JSONArray = JSONArray().apply {
+        val messages = sanitize(rawMessages)
         messages.forEach { m ->
             put(JSONObject().apply {
                 put("role", m.role)
@@ -512,6 +553,15 @@ class AgentEngine(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // 用户主动停止：把占位气泡去掉，不要留下半截内容
                 session.messages.removeAt(placeholderIndex)
+                /*
+                 * 占位气泡可能已经被替换成带 toolCalls 的 assistant 消息，
+                 * 若此时取消，后面挂着的 tool 消息就成了"孤立的 tool"。
+                 * 下一轮请求会报 400: Messages with role 'tool' must be a response
+                 * to a preceding message with 'tool_calls'。这里一并清掉。
+                 */
+                while (session.messages.isNotEmpty() && session.messages.last().role == "tool") {
+                    session.messages.removeAt(session.messages.size - 1)
+                }
                 session.updatedAt = System.currentTimeMillis(); onUpdate()
                 throw e
             } catch (e: Exception) {

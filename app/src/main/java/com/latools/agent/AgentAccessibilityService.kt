@@ -251,7 +251,9 @@ class AgentAccessibilityService : AccessibilityService() {
                 Thread.sleep(120)
                 node.refresh()
                 val now = node.text?.toString().orEmpty()
-                if (now.isEmpty() || now.contains(text.take(8)) || text.isBlank()) return null
+                if (now.contains(text.take(8)) || text.isBlank()) return null
+                // 回读为空：动作被接受但无法确认 —— 不能当成功，否则会出现"报告已填入 N 字符"的假象
+                if (now.isEmpty()) return UNVERIFIED
                 diagnostics.append("SET_TEXT 返回成功但内容未变（$cls）；")
             } else {
                 diagnostics.append("SET_TEXT 被拒绝（$cls）；")
@@ -452,6 +454,9 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     companion object {
+        /** 写入动作被接受、但目标应用不暴露文本，无法校验。 */
+        const val UNVERIFIED = "__UNVERIFIED__"
+
         @Volatile
         var instance: AgentAccessibilityService? = null
             private set
