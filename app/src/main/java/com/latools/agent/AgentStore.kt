@@ -107,6 +107,23 @@ data class AgentSession(
 }
 
 /** 执行通道。用户可多选，引擎按顺序尝试：ROOT → Shizuku → Dhizuku。 */
+/**
+ * 命令审批策略。
+ *
+ * APPROVE 所有命令都要用户点允许（最保守）
+ * FULL    完全权限，不再打断（信任场景）
+ * AUTO    自动审查：只拦截危险模式（默认）
+ */
+enum class ApprovalMode(val id: String, val label: String) {
+    APPROVE("approve", "需要批准"),
+    FULL("full", "完全权限"),
+    AUTO("auto", "自动审查");
+
+    companion object {
+        fun from(id: String?): ApprovalMode = entries.firstOrNull { it.id == id } ?: AUTO
+    }
+}
+
 enum class AgentChannel(val id: String, val label: String) {
     ROOT("root", "ROOT"),
     SHIZUKU("shizuku", "Shizuku"),
@@ -130,6 +147,8 @@ data class AgentConfig(
     val tavilyKey: String,
     /** 模型是否支持识图：开启后才给模型开放手机操控相关工具。 */
     val visionEnabled: Boolean,
+    /** 命令审批策略。 */
+    val approvalMode: ApprovalMode,
 ) {
     val ready: Boolean get() = baseUrl.isNotBlank() && model.isNotBlank()
 }
@@ -191,6 +210,7 @@ object AgentStore {
             stream = p.getBoolean("stream", true),
             tavilyKey = p.getString("tavily_key", "").orEmpty(),
             visionEnabled = p.getBoolean("vision_enabled", true),
+            approvalMode = ApprovalMode.from(p.getString("approval_mode", ApprovalMode.AUTO.id)),
         )
     }
 
@@ -208,6 +228,7 @@ object AgentStore {
             .putBoolean("stream", config.stream)
             .putString("tavily_key", config.tavilyKey.trim())
             .putBoolean("vision_enabled", config.visionEnabled)
+            .putString("approval_mode", config.approvalMode.id)
             .apply()
     }
 

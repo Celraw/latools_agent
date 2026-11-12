@@ -367,11 +367,22 @@ private fun AgentApp() {
             }
             }
 
+            val usedChars = remember(version, session.id) {
+                session.messages.sumOf { (it.content?.length ?: 0) + (it.reasoning?.length ?: 0) }
+            }
             Composer(
                 input = input,
                 onInputChange = { input = it },
                 attachments = attachments,
                 busy = busy,
+                contextUsed = usedChars,
+                contextLimit = config.contextLimitChars,
+                approvalMode = config.approvalMode,
+                onApprovalModeChange = { mode ->
+                    config = config.copy(approvalMode = mode)
+                    AgentStore.saveConfig(context, config)
+                    version++
+                },
                 onPickFile = { picker.launch(arrayOf("*/*")) },
                 onSend = ::send,
                 onStop = {
@@ -977,6 +988,10 @@ private fun Composer(
     onInputChange: (String) -> Unit,
     attachments: List<Pair<String, String>>,
     busy: Boolean,
+    contextUsed: Int,
+    contextLimit: Int,
+    approvalMode: ApprovalMode,
+    onApprovalModeChange: (ApprovalMode) -> Unit,
     onPickFile: () -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
@@ -1012,10 +1027,10 @@ private fun Composer(
             BasicTextField(
                 value = input,
                 onValueChange = onInputChange,
-                modifier = Modifier.weight(1f).padding(vertical = 10.dp),
-                textStyle = TextStyle(fontSize = 14.sp, color = TextMain),
+                modifier = Modifier.weight(1f).heightIn(min = 64.dp).padding(vertical = 12.dp),
+                textStyle = TextStyle(fontSize = 14.sp, color = TextMain, lineHeight = 20.sp),
                 cursorBrush = SolidColor(Primary),
-                maxLines = 4,
+                maxLines = 5,
                 decorationBox = { inner ->
                     if (input.isEmpty()) T("描述你要做的事…", 14.sp, TextFaint)
                     inner()
@@ -1047,6 +1062,58 @@ private fun Composer(
                 }
             }
         }
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            ContextRing(used = contextUsed, limit = contextLimit)
+            Spacer(Modifier.width(10.dp))
+            ApprovalMode.entries.forEach { mode ->
+                val on = mode == approvalMode
+                Box(
+                    Modifier.padding(end = 6.dp).clip(RoundedCornerShape(999.dp))
+                        .background(if (on) Primary else Surface)
+                        .border(1.dp, if (on) Primary else Line, RoundedCornerShape(999.dp))
+                        .clickable { onApprovalModeChange(mode) }
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                ) { T(mode.label, 11.sp, if (on) Color.White else TextSub) }
+            }
+        }
+    }
+}
+
+/**
+ * 上下文圆环：当前会话字符数 / 压缩阈值。
+ *
+ * 用户不需要精确数字，只需要知道"还剩多少空间"——所以画成环 + 中心百分比，
+ * 超过 85% 变红，提示该开新会话或等触发压缩。
+ */
+@Composable
+private fun ContextRing(used: Int, limit: Int) {
+    val ratio = if (limit <= 0) 0f else (used.toFloat() / limit).coerceIn(0f, 1f)
+    val color = when {
+        ratio >= 0.85f -> Danger
+        ratio >= 0.6f -> Color(0xFFE08A00)
+        else -> Ok
+    }
+    Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.fillMaxSize()) {
+            val stroke = 2.4.dp.toPx()
+            val inset = stroke / 2 + 1.dp.toPx()
+            drawArc(
+                Line, -90f, 360f, false,
+                topLeft = Offset(inset, inset),
+                size = Size(size.width - inset * 2, size.height - inset * 2),
+                style = Stroke(stroke),
+            )
+            if (ratio > 0f) {
+                drawArc(
+                    color, -90f, 360f * ratio, false,
+                    topLeft = Offset(inset, inset),
+                    size = Size(size.width - inset * 2, size.height - inset * 2),
+                    style = Stroke(stroke, cap = StrokeCap.Round),
+                )
+            }
+        }
+        T("${(ratio * 100).toInt()}", 8.sp, TextSub, FontWeight.SemiBold)
     }
 }
 

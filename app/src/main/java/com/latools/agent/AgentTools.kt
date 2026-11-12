@@ -209,7 +209,11 @@ object AgentTools {
                 val command = args.optString("command")
                 when {
                     command.isBlank() -> "参数错误：缺少 command"
-                    isDangerous(command) && !confirmDanger(command) -> "用户拒绝了这条命令的执行"
+                    // APPROVE：所有命令都问；FULL：一个都不问；AUTO：只拦危险模式
+                    config.approvalMode == ApprovalMode.APPROVE && !confirmDanger(command) ->
+                        "用户拒绝了这条命令的执行"
+                    config.approvalMode == ApprovalMode.AUTO && isDangerous(command) && !confirmDanger(command) ->
+                        "用户拒绝了这条命令的执行"
                     else -> {
                         val result = AgentShell.run(context, command, config.channels)
                         "${result.output}\n[通道=${result.channel}]"
@@ -661,10 +665,14 @@ object AgentTools {
             "unsuspend" -> "pm unsuspend --user 0 ${shq(pkg)}"
             else -> return "未知动作：$action（可用：force-stop / disable / enable / clear / suspend / unsuspend）"
         }
-        // 破坏性动作先确认
-        if (action == "clear" || action == "disable") {
-            if (!confirmDanger("app_control: $action $pkg\n$cmd")) return "用户拒绝了这个操作"
+        // 破坏性动作先确认（FULL 模式跳过）
+        val destructive = action == "clear" || action == "disable"
+        val needConfirm = when (config.approvalMode) {
+            ApprovalMode.APPROVE -> true
+            ApprovalMode.AUTO -> destructive
+            ApprovalMode.FULL -> false
         }
+        if (needConfirm && !confirmDanger("app_control: $action $pkg\n$cmd")) return "用户拒绝了这个操作"
         val r = AgentShell.run(context, cmd, config.channels, 20_000)
         return "$action $pkg\n${r.output}\n[通道=${r.channel}]"
     }
