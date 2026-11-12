@@ -37,7 +37,6 @@ class AgentAccessibilityService : AccessibilityService() {
                 android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                 android.accessibilityservice.AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
                 android.accessibilityservice.AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
-            info.isAccessibilityTool = true
             setServiceInfo(info)
         }
         PhoneControl.onServiceReady(this)
