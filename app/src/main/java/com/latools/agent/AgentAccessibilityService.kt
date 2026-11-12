@@ -197,6 +197,55 @@ class AgentAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * 把文本填进当前聚焦的输入框（等效"粘贴"）。
+     *
+     * 优先走无障碍 ACTION_SET_TEXT：直接改 EditText 内容，
+     * 中文、emoji、换行都能处理，也不依赖输入法 —— 比 shell `input text`
+     * （只支持 ASCII，且必须先把输入法切成具体键盘）稳定得多。
+     *
+     * @return null 表示成功；非 null 是失败原因（调用方可退回剪贴板粘贴）
+     */
+    fun setFocusedText(text: String): String? {
+        val root = rootInActiveWindow ?: return "当前没有可用窗口"
+        val focused = root.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+        val target = focused ?: run {
+            // 有些输入框没有正确设置焦点标记，退而求其次：找第一个可编辑节点
+            var found: android.view.accessibility.AccessibilityNodeInfo? = null
+            val queue = ArrayDeque<android.view.accessibility.AccessibilityNodeInfo>()
+            queue.add(root)
+            var guard = 0
+            while (queue.isNotEmpty() && found == null && guard++ < 200) {
+                val node = queue.removeFirst()
+                if (node.isEditable && node.isVisibleToUser) {
+                    found = node
+                } else {
+                    for (i in 0 until node.childCount) node.getChild(i)?.let { queue.add(it) }
+                }
+            }
+            found
+        } ?: return "没有找到可编辑的输入框：请先点击聊天输入框，让光标出现在里面"
+
+        val args = android.os.Bundle().apply {
+            putCharSequence(
+                android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                text,
+            )
+        }
+        val ok = target.performAction(
+            android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT,
+            args,
+        )
+        return if (ok) null else "输入框拒绝了写入（可能不是标准 EditText）"
+    }
+
+    /** 读取焦点输入框当前文本，用于写入后校验。 */
+    fun focusedText(): String? = runCatching {
+        val root = rootInActiveWindow ?: return@runCatching null
+        val focused = root.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+        focused?.text?.toString()
+    }.getOrNull()
+
     /** 等界面安静下来（无事件）或超时，返回是否观察到变化。 */
     fun awaitUiChange(before: Long, timeoutMs: Long = 600): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs

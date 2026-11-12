@@ -139,6 +139,14 @@ object AgentTools {
                 JSONObject(), emptyList(),
             )
             fn(
+                "input_text",
+                "把文本直接写入当前聚焦的输入框（等效粘贴，支持中文/emoji）。submit=true 时写完顺带按发送。比 shell input text 稳定得多。",
+                JSONObject()
+                    .put("text", p("string", "要填入的文本"))
+                    .put("submit", p("boolean", "可选，true 表示填完立即发送/回车")),
+                listOf("text"),
+            )
+            fn(
                 "tap_node",
                 "点击 ui_dump 结果里指定序号的元素（推荐：坐标由系统给出，不会点偏）。",
                 JSONObject().put("index", p("number", "ui_dump 输出里的序号")), listOf("index"),
@@ -296,6 +304,46 @@ object AgentTools {
                         append("\n可交互元素共 ").append(nodes.size).append(" 个")
                     }
                     if (nodes.isEmpty()) header + "\n" + text else header + "\n" + text
+                }
+            }
+            "input_text" -> {
+                if (!PhoneControl.isActive) "尚未开始手机操控"
+                else {
+                    val svc = AgentAccessibilityService.instance
+                    if (svc == null) "无障碍服务未连接"
+                    else {
+                        val text = args.optString("text")
+                        if (text.isBlank() && !args.has("text")) "参数错误：缺少 text"
+                        else {
+                            val failure = svc.setFocusedText(text)
+                            if (failure == null) {
+                                Thread.sleep(120)
+                                val submit = args.optBoolean("submit", false)
+                                val sent = if (submit) {
+                                    // 回车优先；很多聊天 App 回车即发送
+                                    AgentShell.run(context, "input keyevent 66", config.channels, 8_000)
+                                    "\n已按回车发送"
+                                } else ""
+                                "已填入输入框（${text.length} 字符）$sent"
+                            } else {
+                                /*
+                                 * 退回剪贴板 + KEYCODE_PASTE：
+                                 * 少数自绘输入框（如某些 IM 的富文本编辑器）拒绝 ACTION_SET_TEXT，
+                                 * 但支持系统粘贴键。
+                                 */
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                cm?.setPrimaryClip(ClipData.newPlainText("Agent", text))
+                                AgentShell.run(context, "input keyevent 279", config.channels, 8_000)
+                                Thread.sleep(150)
+                                val now = svc.focusedText()
+                                if (now != null && now.contains(text.take(12))) {
+                                    "已通过剪贴板粘贴（${text.length} 字符）；提示：$failure"
+                                } else {
+                                    "写入失败：$failure。剪贴板已准备好，可让用户手动长按粘贴"
+                                }
+                            }
+                        }
+                    }
                 }
             }
             "tap_node" -> {
