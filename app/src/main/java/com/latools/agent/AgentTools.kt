@@ -339,7 +339,42 @@ object AgentTools {
                                 if (now != null && now.contains(text.take(12))) {
                                     "已通过剪贴板粘贴（${text.length} 字符）；提示：$failure"
                                 } else {
-                                    "写入失败：$failure。剪贴板已准备好，可让用户手动长按粘贴"
+                                    /*
+                                     * 最后一条路：长按输入框 → 在弹出的菜单里点「粘贴」。
+                                     * 微信这类自绘输入框对 ACTION_SET_TEXT / ACTION_PASTE / KEYCODE_PASTE
+                                     * 都可能不响应，但长按菜单是它自己的 UI，反而可靠。
+                                     */
+                                    val centers = svc.inputCandidateCenters()
+                                    var done = false
+                                    for ((cx, cy) in centers.take(2)) {
+                                        svc.longPress(cx, cy, 700)
+                                        Thread.sleep(450)
+                                        val (tree, nodes) = svc.dumpNodes(maxNodes = 120)
+                                        val pasteIndex = nodes.indexOfFirst { node ->
+                                            node.label.contains("粘贴") || node.label.contains("Paste", ignoreCase = true)
+                                        }
+                                        if (pasteIndex >= 0) {
+                                            svc.tapNode(pasteIndex, nodes)
+                                            Thread.sleep(250)
+                                            val after = svc.focusedText()
+                                            if (after != null && after.contains(text.take(12))) {
+                                                done = true
+                                                break
+                                            }
+                                        } else {
+                                            // 长按可能弹出了别的菜单，按返回键收起
+                                            svc.booleanGlobal(
+                                                android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK,
+                                            )
+                                            Thread.sleep(150)
+                                            runCatching { tree.length }
+                                        }
+                                    }
+                                    if (done) {
+                                        "已通过「长按 → 粘贴」写入（${text.length} 字符）"
+                                    } else {
+                                        "写入失败：$failure；剪贴板已写好（${text.length} 字符），可手动长按粘贴"
+                                    }
                                 }
                             }
                         }

@@ -306,6 +306,22 @@ class AgentAccessibilityService : AccessibilityService() {
         }
     }.getOrElse { "-" }
 
+    /** 长按某点：用于唤起"粘贴"菜单做兜底。 */
+    fun longPress(x: Float, y: Float, durationMs: Long = 700): Boolean {
+        val path = Path().apply { moveTo(x, y) }
+        val stroke = GestureDescription.StrokeDescription(path, 0, durationMs)
+        return runCatching {
+            dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        }.getOrDefault(false)
+    }
+
+    /** 输入框候选的中心点（屏幕坐标），供长按粘贴兜底使用。 */
+    fun inputCandidateCenters(): List<Pair<Float, Float>> = collectEditableCandidates().mapNotNull { node ->
+        val rect = android.graphics.Rect()
+        node.getBoundsInScreen(rect)
+        if (rect.width() > 0 && rect.height() > 0) (rect.exactCenterX() to rect.exactCenterY()) else null
+    }
+
     /** 读取焦点输入框当前文本，用于写入后校验。 */
     fun focusedText(): String? = runCatching {
         val root = rootInActiveWindow ?: return@runCatching null
