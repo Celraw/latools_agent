@@ -24,6 +24,22 @@ class AgentAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        /*
+         * 微信这类应用如果拿不到节点树，最常见原因不是权限，而是无障碍服务没开
+         * FLAG_RETRIEVE_INTERACTIVE_WINDOWS —— 没有它 `windows` 恒为空、
+         * rootInActiveWindow 也可能为 null，ui_dump 自然 0 个元素，
+         * input_text 也就找不到 EditText。这里在运行时再强制补一次，防止 ROM 忽略 XML。
+         */
+        runCatching {
+            val info = serviceInfo ?: return@runCatching
+            info.flags = info.flags or
+                android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                android.accessibilityservice.AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                android.accessibilityservice.AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+            info.isAccessibilityTool = true
+            setServiceInfo(info)
+        }
         PhoneControl.onServiceReady(this)
     }
 

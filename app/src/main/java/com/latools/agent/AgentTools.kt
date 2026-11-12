@@ -316,6 +316,16 @@ object AgentTools {
                         if (text.isBlank() && !args.has("text")) "参数错误：缺少 text"
                         else {
                             val failure = svc.setFocusedText(text)
+                            if (failure != null && svc.inputCandidateCenters().isEmpty()) {
+                                // 节点树完全不可用（例如无障碍 flag 缺失/应用不暴露结构）：
+                                // 光标已聚焦时 KEYCODE_PASTE 通常仍能生效，直接按"已粘贴"处理并说明无法校验
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                cm?.setPrimaryClip(ClipData.newPlainText("Agent", text))
+                                val pasteKey = AgentShell.run(context, "input keyevent 279", config.channels, 8_000)
+                                if (pasteKey.ok) {
+                                    return@execute "已通过粘贴键写入（${text.length} 字符）。注意：当前应用不提供节点树，无法校验，若输入框为空请重试或手动粘贴"
+                                }
+                            }
                             if (failure == null) {
                                 Thread.sleep(120)
                                 val submit = args.optBoolean("submit", false)
