@@ -256,111 +256,161 @@ object AgentApi {
         return sb.toString().trim().ifBlank { "没有搜索结果" }
     }
 
-    fun chat(config: AgentConfig, messages: List<ChatMsg>): AssistantReply {
-        val body = JSONObject().apply {
+    /** 400 时用于自愈的请求变体。 */
+    private enum class Repair { FULL, NO_REASONING, NO_TEMPERATURE, TEXT_ONLY, HALF_HISTORY }
+
+    /**
+     * 构造请求体。
+     *
+     * [repair] 用于 400 后逐级降级：有些"OpenAI 兼容"服务不认识 reasoning_effort /
+     * 不接受图片 / 或干脆上下文超限，逐级去掉比直接失败好。
+     */
+    private fun buildBody(
+        config: AgentConfig,
+        messages: List<ChatMsg>,
+        stream: Boolean,
+        repair: Repair = Repair.FULL,
+    ): JSONObject {
+        var history = messages
+        if (repair == Repair.HALF_HISTORY && history.size > 6) {
+            // 保留 system（如果有）+ 最近一半
+            val keep = history.take(1).filter { it.role == "system" } + history.takeLast(history.size / 2)
+            history = keep
+        }
+        if (repair == Repair.TEXT_ONLY) {
+            history = history.map { m ->
+                if (m.images.isEmpty()) m else m.copy(content = (m.content ?: "") + "（图片已省略）", images = emptyList())
+            }
+        }
+        return JSONObject().apply {
             put("model", config.model)
-            put("messages", buildMessages(messages))
+            put("messages", buildMessages(history))
             put("tools", JSONArray(toolsJson(config.tavilyKey.isNotBlank(), config.visionEnabled)))
             put("tool_choice", "auto")
-            put("temperature", config.temperature)
-            put("stream", false)
-            if (config.reasoningEffort != "none" && config.reasoningEffort.isNotBlank()) {
+            put("stream", stream)
+            if (repair != Repair.NO_TEMPERATURE) put("temperature", config.temperature)
+            if (repair != Repair.NO_REASONING &&
+                config.reasoningEffort != "none" && config.reasoningEffort.isNotBlank()
+            ) {
                 put("reasoning_effort", config.reasoningEffort)
             }
         }
-        return parse(post(config, body))
+    }
+
+    /** 400 的修复顺序：从"最小改动"到"最狠的裁剪"。 */
+    private fun nextRepair(current: Repair): Repair? = when (current) {
+        Repair.FULL -> Repair.NO_REASONING
+        Repair.NO_REASONING -> Repair.NO_TEMPERATURE
+        Repair.NO_TEMPERATURE -> Repair.TEXT_ONLY
+        Repair.TEXT_ONLY -> Repair.HALF_HISTORY
+        Repair.HALF_HISTORY -> null
+    }
+
+    /** 流式 tool_calls 的聚合容器（按 index 累积 id/name/arguments）。 */
+    private class Acc {
+        var id: String = ""
+        var name: String = ""
+        val args = StringBuilder()
+    }
+
+    fun chat(config: AgentConfig, messages: List<ChatMsg>): AssistantReply {
+        var repair = Repair.FULL
+        var lastError = ""
+        while (true) {
+            val body = buildBody(config, messages, stream = false, repair = repair)
+            val result = runCatching { post(config, body) }
+            result.getOrNull()?.let {
+                if (!it.startsWith("HTTP 4")) return parse(it)
+                lastError = it
+            }
+            result.exceptionOrNull()?.let { lastError = it.message ?: it.javaClass.simpleName }
+            val next = nextRepair(repair)
+                ?: return AssistantReply(content = "请求失败：$lastError", reasoning = null, calls = emptyList())
+            repair = next
+        }
     }
 
     /**
      * 流式对话（SSE）。
      *
-     * 逐行解析 `data: {...}`，把 delta 里的 content / reasoning_content 增量回调给上层；
-     * tool_calls 也是增量下发的（id/name 只在第一段出现，arguments 分多段拼），
-     * 所以按 `index` 聚合，最后一次性返回。
+     * 400 时同样逐级降级重试（不重试 401/403，那些重试也没用）。
      */
     suspend fun chatStream(
         config: AgentConfig,
         messages: List<ChatMsg>,
         onDelta: suspend (content: String, reasoning: String) -> Unit,
     ): AssistantReply {
-        val body = JSONObject().apply {
-            put("model", config.model)
-            put("messages", buildMessages(messages))
-            put("tools", JSONArray(toolsJson(config.tavilyKey.isNotBlank(), config.visionEnabled)))
-            put("tool_choice", "auto")
-            put("temperature", config.temperature)
-            put("stream", true)
-            if (config.reasoningEffort != "none" && config.reasoningEffort.isNotBlank()) {
-                put("reasoning_effort", config.reasoningEffort)
+        var repair = Repair.FULL
+        var lastError = ""
+        while (true) {
+            val body = buildBody(config, messages, stream = true, repair = repair)
+            val conn = (URL(config.baseUrl.trimEnd('/') + "/chat/completions").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 20_000
+                readTimeout = 180_000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                setRequestProperty("Accept", "text/event-stream")
+                setRequestProperty("Accept-Encoding", "identity")
+                if (config.apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer ${config.apiKey}")
             }
-        }
-        val conn = (URL(config.baseUrl.trimEnd('/') + "/chat/completions").openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 20_000
-            readTimeout = 180_000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            setRequestProperty("Accept", "text/event-stream")
-            // 必须显式要 identity：否则服务端可能返回 gzip，BufferedReader 读到的是压缩字节，
-            // 一行 data: 都解析不出来，表现就是"开了流式却没流式"。
-            setRequestProperty("Accept-Encoding", "identity")
-            if (config.apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer ${config.apiKey}")
-        }
-        conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-        val code = conn.responseCode
-        SseDiagnostics.lastHttpStatus = code
-        SseDiagnostics.lastContentType = conn.contentType ?: "-"
-        SseDiagnostics.lastDeltaCount = 0
-        SseDiagnostics.lastError = ""
-        if (code !in 200..299) {
-            val text = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            SseDiagnostics.lastError = "HTTP $code ${text.take(160)}"
-            conn.disconnect()
-            val msg = runCatching { JSONObject(text).optJSONObject("error")?.optString("message") }.getOrNull()
-            throw IllegalStateException("接口错误（HTTP $code）：${msg?.takeIf { it.isNotBlank() } ?: text.take(300)}")
-        }
+            conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+            val code = conn.responseCode
+            SseDiagnostics.lastHttpStatus = code
+            SseDiagnostics.lastContentType = conn.contentType ?: "-"
+            SseDiagnostics.lastDeltaCount = 0
+            SseDiagnostics.lastError = ""
+            if (code !in 200..299) {
+                val text = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                conn.disconnect()
+                lastError = "HTTP $code ${text.take(300)}"
+                SseDiagnostics.lastError = lastError
+                val next = if (code == 400 || code == 422) nextRepair(repair) else null
+                if (next == null) throw IllegalStateException(lastError)
+                repair = next
+                continue
+            }
 
-        data class Acc(var id: String = "", var name: String = "", val args: StringBuilder = StringBuilder())
-        val calls = LinkedHashMap<Int, Acc>()
-        val content = StringBuilder()
-        val reasoning = StringBuilder()
-
-        conn.inputStream.bufferedReader().use { reader ->
-            while (true) {
-                val line = reader.readLine() ?: break
-                if (!line.startsWith("data:")) continue
-                val payload = line.removePrefix("data:").trim()
-                if (payload.isEmpty() || payload == "[DONE]") {
-                    if (payload == "[DONE]") break else continue
-                }
-                val obj = runCatching { JSONObject(payload) }.getOrNull() ?: continue
-                val delta = obj.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
-                delta.text("content").takeIf { it.isNotEmpty() }?.let { content.append(it) }
-                delta.text("reasoning_content").ifEmpty { delta.text("reasoning") }
-                    .takeIf { it.isNotEmpty() }?.let { reasoning.append(it) }
-                delta.optJSONArray("tool_calls")?.let { arr ->
-                    for (i in 0 until arr.length()) {
-                        val tc = arr.optJSONObject(i) ?: continue
-                        val idx = tc.optInt("index", 0)
-                        val acc = calls.getOrPut(idx) { Acc() }
-                        tc.text("id").takeIf { it.isNotEmpty() }?.let { acc.id = it }
-                        val fn = tc.optJSONObject("function")
-                        fn?.text("name")?.takeIf { it.isNotEmpty() }?.let { acc.name = it }
-                        fn?.text("arguments")?.takeIf { it.isNotEmpty() }?.let { acc.args.append(it) }
+            val content = StringBuilder()
+            val reasoning = StringBuilder()
+            val calls = sortedMapOf<Int, Acc>()
+            conn.inputStream.bufferedReader().use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    if (!line.startsWith("data:")) continue
+                    val payload = line.removePrefix("data:").trim()
+                    if (payload.isEmpty() || payload == "[DONE]") {
+                        if (payload == "[DONE]") break else continue
                     }
+                    val obj = runCatching { JSONObject(payload) }.getOrNull() ?: continue
+                    val delta = obj.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
+                    delta.text("content").takeIf { it.isNotEmpty() }?.let { content.append(it) }
+                    delta.text("reasoning_content").ifEmpty { delta.text("reasoning") }
+                        .takeIf { it.isNotEmpty() }?.let { reasoning.append(it) }
+                    delta.optJSONArray("tool_calls")?.let { arr ->
+                        for (i in 0 until arr.length()) {
+                            val tc = arr.optJSONObject(i) ?: continue
+                            val idx = tc.optInt("index", 0)
+                            val acc = calls.getOrPut(idx) { Acc() }
+                            tc.text("id").takeIf { it.isNotEmpty() }?.let { acc.id = it }
+                            val fn = tc.optJSONObject("function")
+                            fn?.text("name")?.takeIf { it.isNotEmpty() }?.let { acc.name = it }
+                            fn?.text("arguments")?.takeIf { it.isNotEmpty() }?.let { acc.args.append(it) }
+                        }
+                    }
+                    SseDiagnostics.lastDeltaCount += 1
+                    onDelta(content.toString(), reasoning.toString())
                 }
-                SseDiagnostics.lastDeltaCount += 1
-                onDelta(content.toString(), reasoning.toString())
             }
+            conn.disconnect()
+            return AssistantReply(
+                content = content.toString().ifBlank { null },
+                reasoning = reasoning.toString().ifBlank { null },
+                calls = calls.toSortedMap().values.map {
+                    ToolCall(it.id.ifBlank { "call_${System.nanoTime()}" }, it.name, it.args.toString().ifBlank { "{}" })
+                },
+            )
         }
-        conn.disconnect()
-        return AssistantReply(
-            content = content.toString().ifBlank { null },
-            reasoning = reasoning.toString().ifBlank { null },
-            calls = calls.toSortedMap().values.map {
-                ToolCall(it.id.ifBlank { "call_${System.nanoTime()}" }, it.name, it.args.toString())
-            },
-        )
     }
 
     fun summarize(config: AgentConfig, messages: List<ChatMsg>): String {
@@ -415,7 +465,28 @@ object AgentApi {
                 i++
             }
         }
-        return out
+        /*
+         * 再兜一层：把"没有任何内容也没有 tool_calls"的消息剔掉。
+         * 有些兼容接口对空 assistant/空 user 直接返回 400（content 必须非空）。
+         */
+        val seenCallIds = mutableSetOf<String>()
+        val cleaned = mutableListOf<ChatMsg>()
+        for (m in out) {
+            when (m.role) {
+                "assistant" -> {
+                    val calls = m.toolCalls.orEmpty().map { tc ->
+                        // 工具 id 重复（模型偶尔复用）会导致部分服务端 400，这里加后缀去重
+                        if (seenCallIds.add(tc.id)) tc else tc.copy(id = "${tc.id}_${seenCallIds.size}")
+                    }
+                    if (m.content.isNullOrBlank() && calls.isEmpty()) continue
+                    cleaned += m.copy(toolCalls = calls.ifEmpty { null })
+                }
+                "tool" -> if (m.content.isNullOrBlank()) continue else cleaned += m
+                "system" -> if (m.content.isNullOrBlank()) continue else cleaned += m
+                else -> if (m.content.isNullOrBlank() && m.images.isEmpty()) continue else cleaned += m
+            }
+        }
+        return cleaned
     }
 
     private fun buildMessages(rawMessages: List<ChatMsg>): JSONArray = JSONArray().apply {
