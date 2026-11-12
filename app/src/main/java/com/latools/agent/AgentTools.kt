@@ -281,8 +281,21 @@ object AgentTools {
                 if (svc == null) "无障碍服务未连接"
                 else {
                     val (text, nodes) = svc.dumpNodes()
-                    if (nodes.isEmpty()) text
-                    else "前台：${svc.foregroundPackage() ?: "未知"}，共 ${nodes.size} 个可交互元素：\n$text"
+                    /*
+                     * 头部带"当前页面指纹"：前台包名 + 窗口标题 + 几个可见文本。
+                     * 模型经常在首页却去做搜索，本质是它没有可靠的"我现在在哪一页"依据；
+                     * 把窗口标题和顶部文本直接喂给它，就不需要靠猜。
+                     */
+                    val header = buildString {
+                        append("前台应用：").append(svc.foregroundPackage() ?: "未知")
+                        svc.windowTitle()?.let { append("\n窗口标题：").append(it) }
+                        if (nodes.isNotEmpty()) {
+                            append("\n当前可见文本：")
+                            append(nodes.take(6).joinToString(" | ") { it.label.take(16) })
+                        }
+                        append("\n可交互元素共 ").append(nodes.size).append(" 个")
+                    }
+                    if (nodes.isEmpty()) header + "\n" + text else header + "\n" + text
                 }
             }
             "tap_node" -> {
@@ -342,6 +355,7 @@ object AgentTools {
                         if (!svc.tap(px, py)) return@execute "点击失败：无障碍拒绝执行手势"
                         val changed = svc.awaitUiChange(before, 700)
                         val where = "前台 ${fg ?: "未知"}，点击 ($px, $py)"
+                            .let { if (args.optDouble("x") > 1.0 || args.optDouble("y") > 1.0) "$it（绝对像素；若目标来自 ui_dump，建议改用 tap_node 更准）" else it }
                         if (changed) "已点击（$where），界面已变化"
                         else "已点击（$where），但界面无变化：可能没点中、被遮挡，或该元素需要长按"
                     }

@@ -92,6 +92,11 @@ class AgentAccessibilityService : AccessibilityService() {
 
     fun booleanGlobal(action: Int): Boolean = performGlobalAction(action)
 
+    /** 当前活动窗口标题（很多应用会带页面名，如"微信"、聊天对象名），用于让模型确认自己在哪个页面。 */
+    fun windowTitle(): String? = runCatching {
+        windows.firstOrNull { it.isActive }?.title?.toString()?.takeIf { it.isNotBlank() }
+    }.getOrNull()
+
     /** 当前前台应用包名（用于"点击前确认目标已在前台"）。 */
     fun foregroundPackage(): String? =
         runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull()
@@ -169,8 +174,22 @@ class AgentAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 60))
             .build()
-        val ok = dispatchGesture(gesture, null, null)
-        if (ok) PhoneControl.showTap(node.centerX, node.centerY)
+        val before = eventSeq
+        val ok = try {
+            dispatchGesture(gesture, null, null).also { dispatched ->
+                if (dispatched) PhoneControl.showTap(node.centerX, node.centerY)
+            }
+        } catch (_: Exception) {
+            false
+        }
+        if (!ok) return "点击失败：无障碍拒绝执行手势"
+        // 首次点击可能撞上页面动画/滚动惯性，700ms 内没变化就补点一次
+        if (!awaitUiChange(before, 700)) {
+            try {
+                dispatchGesture(gesture, null, null)
+                PhoneControl.showTap(node.centerX, node.centerY)
+            } catch (_: Exception) { Unit }
+        }
         return if (ok) {
             "已点击 [$index] \"${node.label}\" @(${node.centerX.toInt()}, ${node.centerY.toInt()})"
         } else {
