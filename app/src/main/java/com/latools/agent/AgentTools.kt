@@ -147,6 +147,19 @@ object AgentTools {
                 listOf("text"),
             )
             fn(
+                "ui_diag",
+                "诊断当前窗口与节点类型（排查某应用为什么读不到输入框）。把输出原样反馈给用户即可。",
+                JSONObject(), emptyList(),
+            )
+            fn(
+                "paste_clipboard",
+                "把文本放进剪贴板并按下系统粘贴键（KEYCODE_PASTE）。适用于不暴露节点树的应用：先用 tap 点中输入框，再调用本工具。",
+                JSONObject()
+                    .put("text", p("string", "要粘贴的文本"))
+                    .put("submit", p("boolean", "可选，粘贴后是否按回车")),
+                listOf("text"),
+            )
+            fn(
                 "tap_node",
                 "点击 ui_dump 结果里指定序号的元素（推荐：坐标由系统给出，不会点偏）。",
                 JSONObject().put("index", p("number", "ui_dump 输出里的序号")), listOf("index"),
@@ -304,6 +317,30 @@ object AgentTools {
                         append("\n可交互元素共 ").append(nodes.size).append(" 个")
                     }
                     if (nodes.isEmpty()) header + "\n" + text else header + "\n" + text
+                }
+            }
+            "ui_diag" -> {
+                val svc = AgentAccessibilityService.instance
+                if (svc == null) "无障碍服务未连接" else svc.diagnoseWindows()
+            }
+            "paste_clipboard" -> {
+                val text = args.optString("text")
+                if (text.isBlank() && !args.has("text")) "参数错误：缺少 text"
+                else {
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    cm?.setPrimaryClip(ClipData.newPlainText("Agent", text))
+                    val paste = AgentShell.run(context, "input keyevent 279", config.channels, 8_000)
+                    if (!paste.ok) {
+                        "写入剪贴板成功，但粘贴键执行失败：${paste.output.take(200)}"
+                    } else {
+                        Thread.sleep(200)
+                        if (args.optBoolean("submit", false)) {
+                            AgentShell.run(context, "input keyevent 66", config.channels, 8_000)
+                            "已粘贴并发送（${text.length} 字符）"
+                        } else {
+                            "已粘贴（${text.length} 字符）。注意：不暴露节点树的应用无法校验，请截图确认"
+                        }
+                    }
                 }
             }
             "input_text" -> {

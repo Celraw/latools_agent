@@ -305,8 +305,10 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     private fun isEditableNode(node: android.view.accessibility.AccessibilityNodeInfo): Boolean {
-        if (!node.isVisibleToUser) return false
+        // 注意：微信的输入框有时 isVisibleToUser=false（被输入法盖住/自绘），
+        // 所以 isEditable 的节点即使不可见也先收进来，由上层尝试写入。
         if (node.isEditable) return true
+        if (!node.isVisibleToUser) return false
         val cls = node.className?.toString().orEmpty().lowercase()
         // 微信等自绘输入框：类名里通常还有 EditText / Input
         if (cls.contains("edittext") || cls.contains("input")) return true
@@ -335,6 +337,53 @@ class AgentAccessibilityService : AccessibilityService() {
         val rect = android.graphics.Rect()
         node.getBoundsInScreen(rect)
         if (rect.width() > 0 && rect.height() > 0) (rect.exactCenterX() to rect.exactCenterY()) else null
+    }
+
+    /**
+     * 诊断：把当前所有窗口的节点类型/标志打印出来。
+     * 用于排查"某个应用为什么读不到节点树/找不到输入框"。
+     */
+    fun diagnoseWindows(maxLines: Int = 120): String {
+        val sb = StringBuilder()
+        val ws = runCatching { windows }.getOrElse { emptyList() }
+        sb.append("窗口数：").append(ws.size).append('\n')
+        for (w in ws) {
+            val type = when (w.type) {
+                android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION -> "APPLICATION"
+                android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "INPUT_METHOD"
+                android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM -> "SYSTEM"
+                android.view.accessibility.AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> "A11Y_OVERLAY"
+                else -> "OTHER(${w.type})"
+            }
+            val root = runCatching { w.root }.getOrNull()
+            sb.append("· $type active=${w.isActive} pkg=${root?.packageName ?: "-"} ")
+            sb.append("title=${runCatching { w.title }.getOrNull() ?: "-"}\n")
+            if (root == null) {
+                sb.append("  root=null\n")
+                continue
+            }
+            var count = 0
+            val queue = ArrayDeque<Pair<android.view.accessibility.AccessibilityNodeInfo, Int>>()
+            queue.add(root to 0)
+            while (queue.isNotEmpty() && count < 40) {
+                val (n, depth) = queue.removeFirst()
+                if (depth > 10) continue
+                val cls = n.className?.toString()?.substringAfterLast('.') ?: "-"
+                val flags = buildList {
+                    if (n.isEditable) add("editable")
+                    if (n.isFocusable) add("focusable")
+                    if (n.isFocused) add("focused")
+                    if (n.isClickable) add("clickable")
+                    if (n.isVisibleToUser) add("visible")
+                    if (n.text != null) add("text=${n.text.toString().take(16)}")
+                }
+                sb.append("    ").append(cls).append(' ').append(flags.joinToString(",")).append('\n')
+                count++
+                for (i in 0 until n.childCount) n.getChild(i)?.let { queue.add(it to depth + 1) }
+            }
+        }
+        val lines = sb.lines()
+        return if (lines.size <= maxLines) sb.toString() else lines.take(maxLines).joinToString("\n") + "\n…（已截断）"
     }
 
     /** 读取焦点输入框当前文本，用于写入后校验。 */
