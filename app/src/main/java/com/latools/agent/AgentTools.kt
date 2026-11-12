@@ -209,11 +209,35 @@ object AgentTools {
                 val command = args.optString("command")
                 when {
                     command.isBlank() -> "参数错误：缺少 command"
-                    // APPROVE：所有命令都问；FULL：一个都不问；AUTO：只拦危险模式
+                    // APPROVE：所有命令都问
                     config.approvalMode == ApprovalMode.APPROVE && !confirmDanger(command) ->
                         "用户拒绝了这条命令的执行"
-                    config.approvalMode == ApprovalMode.AUTO && isDangerous(command) && !confirmDanger(command) ->
-                        "用户拒绝了这条命令的执行"
+                    config.approvalMode == ApprovalMode.AUTO -> {
+                        /*
+                         * 自动审查：先做本地快速判断，命中危险模式再让模型复核（避免对每条命令都发请求）。
+                         * 模型判危险 → 不直接拒绝，而是把风险讲清楚让用户决定。
+                         */
+                        // 逐条审查：本地规则先筛（命中直接判危险），其余交给模型判断
+                        val result = if (isDangerous(command)) {
+                            AgentApi.ReviewResult(true, "本地规则命中危险模式（rm -rf / dd / mkfs / 卸载系统应用等）")
+                        } else {
+                            AgentApi.reviewCommand(config, command)
+                        }
+                        if (!result.dangerous) {
+                            val r = AgentShell.run(context, command, config.channels)
+                            "${r.output}\n[通道=${r.channel}]"
+                        } else {
+                            val allowed = confirmDanger(
+                                "命令：${command}\n\nAI 审查：${result.reason}\n\n是否仍然执行？",
+                            )
+                            if (!allowed) {
+                                "用户拒绝了这条命令的执行（AI 审查：${result.reason}）"
+                            } else {
+                                val r = AgentShell.run(context, command, config.channels)
+                                "${r.output}\n[通道=${r.channel}]"
+                            }
+                        }
+                    }
                     else -> {
                         val result = AgentShell.run(context, command, config.channels)
                         "${result.output}\n[通道=${result.channel}]"

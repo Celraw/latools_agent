@@ -413,6 +413,46 @@ object AgentApi {
         }
     }
 
+    /** 单条命令的安全性审查结果。 */
+    data class ReviewResult(val dangerous: Boolean, val reason: String)
+
+    /**
+     * 一次性让模型审查一条命令是否危险。
+     *
+     * 注意：这是一次**独立的、不进入会话历史**的请求 —— 不会在聊天里多出
+     * 一条消息，也不会污染上下文；审查完就丢弃。
+     *
+     * 失败（网络/解析）时退回本地正则判断，绝不因为审查器挂了就把危险命令放行。
+     */
+    fun reviewCommand(config: AgentConfig, command: String): ReviewResult {
+        val system = ChatMsg(
+            "system",
+            "你是 Android shell 命令安全审查器。判断命令被自动执行是否可能造成不可逆损害：" +
+                "删除/覆盖重要数据、格式化分区、刷机、卸载或禁用系统应用、提权后门、外发隐私数据等。" +
+                "只输出 JSON，不要任何多余文字：{\"dangerous\":true/false,\"reason\":\"一句话中文理由\"}",
+        )
+        val user = ChatMsg("user", "命令：\n" + command.take(2_000))
+        return runCatching {
+            val body = JSONObject().apply {
+                put("model", config.model)
+                put("messages", buildMessages(listOf(system, user)))
+                put("temperature", 0)
+                put("stream", false)
+                put("max_tokens", 200)
+            }
+            val text = post(config, body)
+            val content = parse(text).content.orEmpty()
+            val json = JSONObject(content.substringAfter('{').let { "{" + it.substringBeforeLast('}') + "}" })
+            val dangerous = json.optBoolean("dangerous", true)
+            val reason = json.optString("reason").ifBlank { if (dangerous) "审查器认为有风险" else "审查通过" }
+            ReviewResult(dangerous, reason)
+        }.getOrElse {
+            // 审查失败：保守处理，交给本地危险模式判断
+            val risky = AgentTools.isDangerous(command)
+            ReviewResult(risky, if (risky) "本地规则命中危险模式（审查器不可用）" else "审查器不可用，本地规则未命中")
+        }
+    }
+
     fun summarize(config: AgentConfig, messages: List<ChatMsg>): String {
         val prompt = ChatMsg(
             role = "system",
