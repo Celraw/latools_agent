@@ -198,46 +198,113 @@ class AgentAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * 把文本填进当前聚焦的输入框（等效"粘贴"）。
+     * 把文本写进聊天输入框（等效粘贴）。
      *
-     * 优先走无障碍 ACTION_SET_TEXT：直接改 EditText 内容，
-     * 中文、emoji、换行都能处理，也不依赖输入法 —— 比 shell `input text`
-     * （只支持 ASCII，且必须先把输入法切成具体键盘）稳定得多。
+     * 为什么微信会失败、QQ 却正常：
+     * 微信的输入框是自绘控件，`isEditable` 有时为 false，而且键盘弹出时
+     * `rootInActiveWindow` 可能指向**输入法窗口**而不是应用窗口 ——
+     * 在输入法窗口里当然找不到可编辑节点。
      *
-     * @return null 表示成功；非 null 是失败原因（调用方可退回剪贴板粘贴）
+     * 所以这里不再只信 rootInActiveWindow，而是：
+     *  1. 遍历所有窗口，优先应用窗口（跳过输入法窗口），收集候选可编辑节点；
+     *  2. 对每个候选：先 ACTION_SET_TEXT，再回读校验；
+     *  3. 仍失败则把文本放进剪贴板，对该节点 ACTION_PASTE；
+     *  4. 还不行，才回退到全局 KEYCODE_PASTE。
+     *
+     * @return null 表示成功；非 null 是失败原因（含候选诊断信息）
      */
     fun setFocusedText(text: String): String? {
-        val root = rootInActiveWindow ?: return "当前没有可用窗口"
-        val focused = root.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
-        val target = focused ?: run {
-            // 有些输入框没有正确设置焦点标记，退而求其次：找第一个可编辑节点
-            var found: android.view.accessibility.AccessibilityNodeInfo? = null
-            val queue = ArrayDeque<android.view.accessibility.AccessibilityNodeInfo>()
-            queue.add(root)
-            var guard = 0
-            while (queue.isNotEmpty() && found == null && guard++ < 200) {
-                val node = queue.removeFirst()
-                if (node.isEditable && node.isVisibleToUser) {
-                    found = node
-                } else {
-                    for (i in 0 until node.childCount) node.getChild(i)?.let { queue.add(it) }
-                }
-            }
-            found
-        } ?: return "没有找到可编辑的输入框：请先点击聊天输入框，让光标出现在里面"
+        val candidates = collectEditableCandidates()
+        if (candidates.isEmpty()) {
+            return "没有找到输入框。当前窗口：" + dumpWindowSummary() +
+                "。请先点击聊天输入框让光标出现"
+        }
 
+        val cm = getSystemService(android.content.ClipboardManager::class.java)
         val args = android.os.Bundle().apply {
             putCharSequence(
                 android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
                 text,
             )
         }
-        val ok = target.performAction(
-            android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT,
-            args,
-        )
-        return if (ok) null else "输入框拒绝了写入（可能不是标准 EditText）"
+
+        val diagnostics = StringBuilder()
+        for (node in candidates) {
+            val cls = node.className?.toString() ?: "-"
+            // 路径 A：直接 SET_TEXT
+            if (node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                Thread.sleep(120)
+                node.refresh()
+                val now = node.text?.toString().orEmpty()
+                if (now.isEmpty() || now.contains(text.take(8)) || text.isBlank()) return null
+                diagnostics.append("SET_TEXT 返回成功但内容未变（$cls）；")
+            } else {
+                diagnostics.append("SET_TEXT 被拒绝（$cls）；")
+            }
+
+            // 路径 B：剪贴板 + ACTION_PASTE（微信这类自绘输入框通常只认粘贴）
+            cm?.setPrimaryClip(android.content.ClipData.newPlainText("Agent", text))
+            if (node.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_PASTE)) {
+                Thread.sleep(180)
+                node.refresh()
+                val now = node.text?.toString().orEmpty()
+                if (now.isEmpty() || now.contains(text.take(8))) return null
+                diagnostics.append("ACTION_PASTE 后内容仍未变（$cls）；")
+            } else {
+                diagnostics.append("ACTION_PASTE 被拒绝（$cls）；")
+            }
+        }
+
+        return "写入失败：$diagnostics 候选=" + candidates.joinToString(",") { it.className?.toString()?.substringAfterLast('.') ?: "-" }
     }
+
+    /** 收集所有窗口里的可编辑候选，应用窗口优先，跳过输入法窗口。 */
+    private fun collectEditableCandidates(): List<android.view.accessibility.AccessibilityNodeInfo> {
+        val result = mutableListOf<android.view.accessibility.AccessibilityNodeInfo>()
+        val ordered = runCatching {
+            windows.sortedWith(
+                compareByDescending<android.view.accessibility.AccessibilityWindowInfo> {
+                    it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
+                }.thenByDescending { it.isActive },
+            )
+        }.getOrElse { emptyList() }
+
+        for (window in ordered) {
+            if (window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+            val root = runCatching { window.root }.getOrNull() ?: continue
+            // 焦点节点优先
+            root.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+                ?.takeIf { isEditableNode(it) }
+                ?.let { result += it }
+            // 再遍历补漏（自绘输入框 isEditable 可能为 false，用类名/输入类型兜底）
+            val queue = ArrayDeque<android.view.accessibility.AccessibilityNodeInfo>()
+            queue.add(root)
+            var guard = 0
+            while (queue.isNotEmpty() && guard++ < 300) {
+                val node = queue.removeFirst()
+                if (isEditableNode(node) && result.none { it == node }) result += node
+                for (i in 0 until node.childCount) node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return result
+    }
+
+    private fun isEditableNode(node: android.view.accessibility.AccessibilityNodeInfo): Boolean {
+        if (!node.isVisibleToUser) return false
+        if (node.isEditable) return true
+        val cls = node.className?.toString().orEmpty().lowercase()
+        // 微信等自绘输入框：类名里通常还有 EditText / Input
+        if (cls.contains("edittext") || cls.contains("input")) return true
+        // 最后放宽：可聚焦但不可点击的节点（自绘输入区常见特征）
+        return node.isFocusable && !node.isClickable && node.text == null
+    }
+
+    private fun dumpWindowSummary(): String = runCatching {
+        windows.joinToString(",") { w ->
+            val pkg = w.root?.packageName?.toString() ?: "-"
+            "type=${w.type}/$pkg"
+        }
+    }.getOrElse { "-" }
 
     /** 读取焦点输入框当前文本，用于写入后校验。 */
     fun focusedText(): String? = runCatching {
