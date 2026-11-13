@@ -127,7 +127,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent { AgentApp() }
+        setContent {
+        LaCloudUpdateEffect("agent")
+        AgentApp()
+    }
     }
 }
 
@@ -1240,7 +1243,19 @@ private fun SettingsPanel(
     var tavilyKey by remember { mutableStateOf(config.tavilyKey) }
     var visionEnabled by remember { mutableStateOf(config.visionEnabled) }
     var maxRounds by remember { mutableStateOf(config.maxToolRounds.toString()) }
+    var toolGroups by remember { mutableStateOf(config.toolGroups) }
+    var permTick by remember { mutableStateOf(0) }
     val context = LocalContext.current
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        permTick++
+        android.widget.Toast.makeText(
+            context,
+            "授权结果已更新。若没有弹出授权框，请到系统设置 → 应用 → LA Agent → 权限 里手动开启",
+            android.widget.Toast.LENGTH_LONG,
+        ).show()
+    }
     // 无障碍服务连接状态：每次进入设置页刷新一次
     var accessibilityOn by remember { mutableStateOf(AgentAccessibilityService.isConnected()) }
     LaunchedEffect(Unit) { accessibilityOn = AgentAccessibilityService.isConnected() }
@@ -1292,16 +1307,19 @@ private fun SettingsPanel(
                     Box(Modifier.clickable(onClick = onRefresh)) { T("刷新", 11.sp, Primary) }
                 }
                 Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    AgentChannel.entries.forEach { ch ->
-                        val usable = ch in available
-                        Chip(if (usable) ch.label else "${ch.label}（点此授权）", usable && ch.id in channels) {
-                            if (usable) channels = if (ch.id in channels) channels - ch.id else channels + ch.id
-                            else onRequest(ch)
+                AgentChannel.entries.chunked(2).forEach { rowItems ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        rowItems.forEach { ch ->
+                            val usable = ch in available
+                            Chip(if (usable) ch.label else "${ch.label}（点此授权）", usable && ch.id in channels) {
+                                if (usable) channels = if (ch.id in channels) channels - ch.id else channels + ch.id
+                                else onRequest(ch)
+                            }
                         }
                     }
+                    Spacer(Modifier.height(6.dp))
                 }
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(2.dp))
                 T("执行时按 ROOT → Shizuku → Dhizuku 顺序尝试，命中第一个可用通道。", 11.sp, TextFaint)
             }
 
@@ -1385,6 +1403,79 @@ private fun SettingsPanel(
                 )
             }
 
+            SectionLabel("工具与权限")
+            WhiteCard {
+                // permTick 作为 key：授权弹窗/系统设置返回后要重新读取状态
+                val grantedMap = remember(permTick) {
+                    ToolPerm.entries.associateWith { it.granted(context) }
+                }
+                T(
+                    "扩展工具按权限工作：未授权的工具不会执行，会让 AI 提示你到这里开启。" +
+                        "已授权 ${grantedMap.count { it.value }}/${ToolPerm.entries.size} 项。",
+                    11.sp, TextFaint,
+                )
+                Spacer(Modifier.height(10.dp))
+                ToolPerm.entries.forEachIndexed { index, perm ->
+                    val granted = grantedMap[perm] == true
+                    if (index > 0) Spacer(Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            T(perm.label, 13.sp, TextMain, FontWeight.SemiBold)
+                            Spacer(Modifier.height(2.dp))
+                            T(
+                                if (granted) "已授权" else perm.desc,
+                                11.sp, if (granted) Ok else TextFaint,
+                            )
+                        }
+                        if (!granted) {
+                            Box(
+                                Modifier.clip(RoundedCornerShape(10.dp)).background(Surface2)
+                                    .clickable {
+                                        if (perm.runtime.isNotEmpty()) {
+                                            permissionLauncher.launch(perm.runtime.toTypedArray())
+                                        } else {
+                                            perm.specialIntent(context)?.let { intent ->
+                                                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                runCatching { context.startActivity(intent) }
+                                            }
+                                        }
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                            ) { T("去授权", 12.sp, Primary) }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Box(Modifier.clickable { permTick++ }) { T("刷新授权状态", 11.sp, Primary) }
+            }
+
+            SectionLabel("工具分组")
+            WhiteCard {
+                T(
+                    "关闭的分组会从模型的工具列表里整体移除，等于关掉这部分能力。默认全部开启。",
+                    11.sp, TextFaint,
+                )
+                Spacer(Modifier.height(10.dp))
+                ToolGroup.entries.chunked(2).forEach { rowItems ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        rowItems.forEach { group ->
+                            val on = group.id in toolGroups
+                            Chip(group.label, on) {
+                                toolGroups = if (on) toolGroups - group.id else toolGroups + group.id
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
+                T(
+                    "高级与危险：安装/卸载应用，执行前必须用户确认；时间与提醒：闹钟、计时器、提醒；" +
+                        "位置与导航：定位、地图导航；设备控制：锁屏、手电筒、音量、亮度等；" +
+                        "状态查询：电量、网络、通知、用量；通讯与日程：联系人、电话、短信、日历；" +
+                        "文件与媒体：目录、搜索、照片、录屏。",
+                    10.sp, TextFaint,
+                )
+            }
+
             SectionLabel("联网搜索")
             WhiteCard {
                 Field("Tavily API Key", tavilyKey, { tavilyKey = it }, secret = true)
@@ -1400,7 +1491,9 @@ private fun SettingsPanel(
             SectionLabel("安全")
             WhiteCard {
                 T(
-                    "命令以本机特权身份执行。Agent 只能调用内置的 run_shell / get_device_info 两个工具，无法访问网络接口或任意 App 私有数据。",
+                    "命令以本机特权身份执行。扩展工具在本地运行：位置/通讯录/日历/短信/照片等敏感权限需要你逐项授权，" +
+                        "未授权时 AI 只能得到一条「去授权」的提示，无法绕过。" +
+                        "安装/卸载、发短信、拨出电话等操作会先弹确认；只读工具（查状态、看日程）不打断你。",
                     11.sp, TextFaint,
                 )
             }
@@ -1421,6 +1514,7 @@ private fun SettingsPanel(
                         tavilyKey = tavilyKey,
                         visionEnabled = visionEnabled,
                         maxToolRounds = maxRounds.toIntOrNull()?.coerceIn(1, 100) ?: 50,
+                        toolGroups = toolGroups,
                     ),
                 )
             }
