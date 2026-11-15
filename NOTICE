@@ -1,0 +1,9 @@
+LA Agent
+Copyright 2026 Celraw
+
+This product is licensed under the Apache License, Version 2.0.
+See the LICENSE file for the full license text.
+
+Third-party dependencies (AndroidX / Jetpack Compose, Kotlin, Shizuku API,
+Dhizuku-API, etc.) are used under their respective licenses; refer to each
+project's repository for details.

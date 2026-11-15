@@ -11,13 +11,23 @@ local.properties
 dist/
 *.apk
 *.aab
+*.jar.tmp
+
+# ===== 签名与密钥：绝不入库 =====
+keystore.properties
 *.jks
 *.keystore
-
-# 签名配置（含密码，绝不入库）
-keystore.properties
+*.p12
+*.pfx
+*.pem
+*.key
+signing/
+/release/
+.env
+.env.*
 
 # 临时文件
 MainActivity.new.kt
 *.log
+*.bak
 .DS_Store
