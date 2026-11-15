@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Celraw
+
 package com.latools.agent
 
 import android.content.ClipData
@@ -42,7 +45,7 @@ object AgentTools {
     fun isDangerous(command: String): Boolean = DANGEROUS.any { it.containsMatchIn(command) }
 
     /** 生成给接口的 tools 数组。 */
-    fun toolsJson(includeSearch: Boolean, includeControl: Boolean): String = JSONArray().apply {
+    fun toolsJson(includeSearch: Boolean, includeControl: Boolean, config: AgentConfig): String = JSONArray().apply {
         fun fn(name: String, description: String, props: JSONObject, required: List<String>) {
             put(JSONObject().apply {
                 put("type", "function")
@@ -188,6 +191,8 @@ object AgentTools {
                 JSONObject().put("query", p("string", "搜索关键词，尽量具体")), listOf("query"),
             )
         }
+        // 扩展工具（时间/位置/设备/状态/通讯/文件/高级），按设置里的分组开关追加
+        AgentExtTools.appendSpecs(config, this)
     }.toString()
 
     /**
@@ -204,6 +209,8 @@ object AgentTools {
         confirmDanger: suspend (String) -> Boolean,
     ): String {
         val args = runCatching { JSONObject(call.arguments) }.getOrElse { JSONObject() }
+        // 扩展工具优先分发；返回 null 说明是内置工具，继续走下面的 when
+        AgentExtTools.execute(ToolCtx(context, config, confirmDanger), call.name, args)?.let { return it }
         return when (call.name) {
             "run_shell" -> {
                 val command = args.optString("command")
@@ -771,13 +778,18 @@ object AgentTools {
     }
 
     private suspend fun screenshot(context: Context, config: AgentConfig): String {
+        /*
+         * 优先用无障碍截屏：Android 11+ 无障碍服务可以直接截屏，
+         * 不依赖 ROOT / Shizuku 通道；通道截图只作为无障碍未开启时的兜底。
+         */
+        AccessibilityCapture.capture()?.let { return it }
         val dir = context.getExternalFilesDir(null) ?: context.filesDir
         val file = File(dir, "agent_shot.png")
         if (file.exists()) file.delete()
         // 用特权通道截屏：shell 身份才能访问 SurfaceFlinger
         val result = AgentShell.run(context, "screencap -p '${file.absolutePath}'", config.channels, 15_000)
         if (!file.exists() || file.length() <= 0) {
-            return "截图失败：${result.output.take(300)}（需要可用的 ROOT / Shizuku 通道）"
+            return "截图失败：${result.output.take(300)}（需要无障碍服务，或可用的 ROOT / Shizuku 通道）"
         }
         val bytes = runCatching { file.readBytes() }.getOrDefault(ByteArray(0))
         file.delete()

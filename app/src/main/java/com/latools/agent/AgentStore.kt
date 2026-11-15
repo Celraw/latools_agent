@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Celraw
+
 package com.latools.agent
 
 import android.content.Context
@@ -149,6 +152,11 @@ data class AgentConfig(
     val visionEnabled: Boolean,
     /** 命令审批策略。 */
     val approvalMode: ApprovalMode,
+    /**
+     * 启用的扩展工具分组（见 [ToolGroup]）。
+     * 关掉的分组不会出现在模型的 tools 列表里，等于从能力上移除，而不是执行时再拒绝。
+     */
+    val toolGroups: Set<String> = ToolGroup.DEFAULT,
 ) {
     val ready: Boolean get() = baseUrl.isNotBlank() && model.isNotBlank()
 }
@@ -176,7 +184,8 @@ object AgentStore {
             "4. 失败要如实说：命令返回非 0 或权限不足时，原样说明失败原因，不要编造结果。\n" +
             "5. 回答用中文，先给结论再给依据；命令放在代码块里，输出过长时只摘关键行。\n" +
             "6. 不确定设备型号/ROM 差异时先问，不要猜测。\n" +
-            "可用工具：run_shell、get_device_info、fetch_url / http_request、screenshot、clipboard_get / clipboard_set、open_app、read_file / write_file（仅限应用目录）、list_packages、app_control。配置 Tavily Key 后有 web_search。若模型支持识图，可调用 phone_control_start 请求用户授权后操控手机（screen_snapshot 看屏幕、tap / swipe / press 操作、phone_control_stop 结束）。操控顺序（必须遵守）：先 phone_control_start 请求用户授权，授权通过后 Agent 会自动退到桌面，再 open_app 打开目标应用；绝对不要先 open_app 再申请操控 —— 那样目标应用已经在前台，用户还得切回 Agent 去点确认，流程会断。操控要点：① 每次进入新界面（打开应用、跳转、返回）先 ui_dump 或 screen_snapshot 确认当前在哪个页面，看清标题/可见文本再决定下一步；不要凭猜测或凭记忆操作——如果 ui_dump 里已经能看到首页元素，就说明你已经在首页，不要再点搜索。② 定位控件优先用 ui_dump（无障碍节点树，带序号和坐标），再用 tap_node(序号) 点击；文本可直接 tap_text(文本)；节点树为空（游戏/canvas 界面）时才用截图+相对坐标 tap。点击后工具会告诉你界面是否有变化：若显示「界面无变化」，说明没点中，应重新 ui_dump 或截图确认，不要盲目继续。③ 接口可能把你看到的图片缩放，所以 tap/swipe 优先传 0~1 相对坐标（如 x=0.5,y=0.8），不要按目测像素；② 点击前先用 get_foreground_app 确认目标应用在前台，Agent 自身界面已退到桌面；④ 若前台不是目标应用，先 open_app 再截图确认；⑤ 需要输入文字时：先 tap_node 点一下输入框（让光标进去），再用 input_text 填内容（支持中文/emoji；submit=true 可顺带发送）。若 input_text 提示找不到输入框（应用不暴露节点树），改用：tap 点中输入框（截图定位）→ paste_clipboard 粘贴文本；仍失败再 ui_diag 把窗口信息反馈给用户。shell `input text` 只支持 ASCII，作为最后的兜底。每次操控都必须先经用户同意，用户可随时连按两次音量上键中止。"
+            "可用工具：run_shell、get_device_info、fetch_url / http_request、screenshot、clipboard_get / clipboard_set、open_app、read_file / write_file（仅限应用目录）、list_packages、app_control。配置 Tavily Key 后有 web_search。若模型支持识图，可调用 phone_control_start 请求用户授权后操控手机（screen_snapshot 看屏幕、tap / swipe / press 操作、phone_control_stop 结束）。操控顺序（必须遵守）：先 phone_control_start 请求用户授权，授权通过后 Agent 会自动退到桌面，再 open_app 打开目标应用；绝对不要先 open_app 再申请操控 —— 那样目标应用已经在前台，用户还得切回 Agent 去点确认，流程会断。操控要点：① 每次进入新界面（打开应用、跳转、返回）先 ui_dump 或 screen_snapshot 确认当前在哪个页面，看清标题/可见文本再决定下一步；不要凭猜测或凭记忆操作——如果 ui_dump 里已经能看到首页元素，就说明你已经在首页，不要再点搜索。② 定位控件优先用 ui_dump（无障碍节点树，带序号和坐标），再用 tap_node(序号) 点击；文本可直接 tap_text(文本)；节点树为空（游戏/canvas 界面）时才用截图+相对坐标 tap。点击后工具会告诉你界面是否有变化：若显示「界面无变化」，说明没点中，应重新 ui_dump 或截图确认，不要盲目继续。③ 接口可能把你看到的图片缩放，所以 tap/swipe 优先传 0~1 相对坐标（如 x=0.5,y=0.8），不要按目测像素；② 点击前先用 get_foreground_app 确认目标应用在前台，Agent 自身界面已退到桌面；④ 若前台不是目标应用，先 open_app 再截图确认；⑤ 需要输入文字时：先 tap_node 点一下输入框（让光标进去），再用 input_text 填内容（支持中文/emoji；submit=true 可顺带发送）。若 input_text 提示找不到输入框（应用不暴露节点树），改用：tap 点中输入框（截图定位）→ paste_clipboard 粘贴文本；仍失败再 ui_diag 把窗口信息反馈给用户。shell `input text` 只支持 ASCII，作为最后的兜底。每次操控都必须先经用户同意，用户可随时连按两次音量上键中止。" +
+            "扩展工具（可在设置里按分组关闭）：时间与提醒（get_time / set_alarm / set_timer / query_alarm / dismiss_alarm / create_reminder / list_reminders / cancel_reminder）；位置与导航（get_location / navigate_to）；设备控制（global_action：锁屏、电源菜单、通知栏、免 root 截屏；flashlight、set_volume、media_control、vibrate、set_brightness、set_display、dnd、system_toggle、speak、sensors）；状态查询（get_status / get_network / list_notifications / usage_stats）；通讯与日程（search_contacts / call / send_sms / calendar）；文件与媒体（list_dir / search_files / recent_photos / record_screen）；系统与其他（open_uri / open_settings / app_details / share_text / install_apk / uninstall_app）。扩展工具使用约定：①优先用专用工具而不是 run_shell 拼命令——专用工具有参数校验、权限检查和可读的失败原因；②工具返回「缺少某授权」时，把设置路径（Agent 设置 → 工具与权限）原样告诉用户，绝对不要用 shell 绕过权限；③拨出电话、发短信、安装/卸载、改分辨率、录屏等有外部影响的操作会先弹确认，用户拒绝就停止，不要换一条命令重试；④只读查询（状态、日程、联系人、通知）不要反复请求确认；⑤WiFi/蓝牙/飞行模式/显示参数等系统开关依赖 ROOT/Shizuku 通道，没有通道时如实说明，不要编造执行成功；⑥工具返回的坐标、时间、电量等数据以工具结果为准，不要凭记忆编造。"
 
     fun config(context: Context): AgentConfig {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -211,6 +220,7 @@ object AgentStore {
             tavilyKey = p.getString("tavily_key", "").orEmpty(),
             visionEnabled = p.getBoolean("vision_enabled", true),
             approvalMode = ApprovalMode.from(p.getString("approval_mode", ApprovalMode.AUTO.id)),
+            toolGroups = p.getStringSet("tool_groups", ToolGroup.DEFAULT)?.toSet() ?: ToolGroup.DEFAULT,
         )
     }
 
@@ -229,6 +239,7 @@ object AgentStore {
             .putString("tavily_key", config.tavilyKey.trim())
             .putBoolean("vision_enabled", config.visionEnabled)
             .putString("approval_mode", config.approvalMode.id)
+            .putStringSet("tool_groups", config.toolGroups)
             .apply()
     }
 

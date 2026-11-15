@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Celraw
+
 package com.latools.agent
 
 import android.content.Context
@@ -156,8 +159,8 @@ data class AssistantReply(val content: String?, val reasoning: String?, val call
  */
 object AgentApi {
 
-    private fun toolsJson(includeSearch: Boolean, includeControl: Boolean): String =
-        AgentTools.toolsJson(includeSearch, includeControl)
+    private fun toolsJson(config: AgentConfig): String =
+        AgentTools.toolsJson(config.tavilyKey.isNotBlank(), config.visionEnabled, config)
 
     /**
      * 直接抓取一个 URL 的正文。
@@ -285,7 +288,7 @@ object AgentApi {
         return JSONObject().apply {
             put("model", config.model)
             put("messages", buildMessages(history))
-            put("tools", JSONArray(toolsJson(config.tavilyKey.isNotBlank(), config.visionEnabled)))
+            put("tools", JSONArray(toolsJson(config)))
             put("tool_choice", "auto")
             put("stream", stream)
             if (repair != Repair.NO_TEMPERATURE) put("temperature", config.temperature)

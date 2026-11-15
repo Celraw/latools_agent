@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Celraw
+
 package com.latools.agent
 
 import android.net.Uri
